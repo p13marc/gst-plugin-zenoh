@@ -1,0 +1,31 @@
+[package]
+name = "gst-plugin-zenoh"
+version = "0.1.0"
+authors = ["Marc Pardo <p13marc@gmail.com>"]
+license = "MPL-2.0"
+description = "GStreamer Plugin for Zenoh"
+repository = "https://github.com/p13marc/gst-plugin-zenoh.git"
+edition = "2021"
+
+[lib]
+name = "gstzenoh"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+gst = { package = "gstreamer", git = "https://gitlab.freedesktop.org/gstreamer/gstreamer-rs", branch = "main" }
+gst-base = { package = "gstreamer-base", git = "https://gitlab.freedesktop.org/gstreamer/gstreamer-rs", branch = "main" }
+
+[dev-dependencies]
+anyhow = "1"
+futures = "0.3"
+tokio = { version = "1", features = [
+    "fs",
+    "macros",
+    "rt-multi-thread",
+    "time",
+] }
+tokio-stream = "0.1.11"
+
+[build-dependencies]
+gst-plugin-version-helper = "0.8.2"
