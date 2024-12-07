@@ -1,10 +1,40 @@
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
-use gst::{glib, subclass::prelude::*};
-use gst_base::subclass::prelude::{BaseSrcImpl, PushSrcImpl};
+use gst::{glib, prelude::*, subclass::prelude::*};
+use gst_base::{
+    prelude::BaseSrcExt,
+    subclass::{base_src::CreateSuccess, prelude::*},
+};
+
+use crate::utils::RUNTIME;
+
+static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
+    gst::DebugCategory::new("zenohsrc", gst::DebugColorFlags::empty(), Some("Zenoh Src"))
+});
+
+struct Started {
+    session: zenoh::Session,
+    subscriber:
+        zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+}
 
 #[derive(Default)]
-pub struct ZenohSrc {}
+enum State {
+    #[default]
+    Stopped,
+    Started(Started),
+}
+
+#[derive(Debug, Default)]
+struct Settings {
+    key_expr: String,
+}
+
+#[derive(Default)]
+pub struct ZenohSrc {
+    settings: Mutex<Settings>,
+    state: Mutex<State>,
+}
 
 impl GstObjectImpl for ZenohSrc {}
 
@@ -47,33 +77,41 @@ impl ElementImpl for ZenohSrc {
 
 impl ObjectImpl for ZenohSrc {
     fn properties() -> &'static [glib::ParamSpec] {
-        &[]
+        static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
+            vec![glib::ParamSpecString::builder("key-expr")
+                .nick("key expression")
+                .blurb("Key expression to where to received data")
+                .build()]
+        });
+
+        PROPERTIES.as_ref()
     }
 
-    fn signals() -> &'static [glib::subclass::Signal] {
-        &[]
+    fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+        let mut settings = self.settings.lock().unwrap();
+
+        match pspec.name() {
+            "key-expr" => {
+                settings.key_expr = value.get::<String>().expect("type checked upstream");
+            }
+            _ => unimplemented!(),
+        }
     }
 
-    fn set_property(&self, _id: usize, _value: &glib::Value, _pspec: &glib::ParamSpec) {
-        std::unimplemented!()
-    }
+    fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+        let settings = self.settings.lock().unwrap();
 
-    fn property(&self, _id: usize, _pspec: &glib::ParamSpec) -> glib::Value {
-        std::unimplemented!()
+        match pspec.name() {
+            "key-expr" => settings.key_expr.to_value(),
+            _ => unimplemented!(),
+        }
     }
 
     fn constructed(&self) {
         self.parent_constructed();
-    }
-
-    fn dispose(&self) {}
-
-    fn notify(&self, pspec: &glib::ParamSpec) {
-        self.parent_notify(pspec)
-    }
-
-    fn dispatch_properties_changed(&self, pspecs: &[glib::ParamSpec]) {
-        self.parent_dispatch_properties_changed(pspecs)
+        self.obj().set_format(gst::Format::Time);
+        self.obj().set_do_timestamp(true);
+        self.obj().set_live(true);
     }
 }
 
@@ -84,21 +122,74 @@ impl ObjectSubclass for ZenohSrc {
     type ParentType = gst_base::PushSrc;
 }
 
-impl BaseSrcImpl for ZenohSrc {}
+impl BaseSrcImpl for ZenohSrc {
+    fn start(&self) -> Result<(), gst::ErrorMessage> {
+        let mut state = self.state.lock().unwrap();
+
+        if let State::Started { .. } = *state {
+            unreachable!("ZenohSrc is already started");
+        }
+
+        let settings = self.settings.lock().unwrap();
+        let key_expr = settings.key_expr.clone();
+        drop(settings);
+
+        *state = {
+            let _enter = RUNTIME.enter();
+            futures::executor::block_on(async move {
+                let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+                let subscriber: zenoh::pubsub::Subscriber<
+                    zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>,
+                > = session.declare_subscriber(key_expr).await.unwrap();
+                State::Started(Started {
+                    session,
+                    subscriber,
+                })
+            })
+        };
+
+        // *state = RUNTIME.block_on(async move {
+        //     let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        //     let subscriber: zenoh::pubsub::Subscriber<
+        //         zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>,
+        //     > = session.declare_subscriber(key_expr).await.unwrap();
+        //     State::Started(Started {
+        //         session,
+        //         subscriber,
+        //     })
+        // });
+
+        Ok(())
+    }
+    fn stop(&self) -> Result<(), gst::ErrorMessage> {
+        *self.state.lock().unwrap() = State::Stopped;
+
+        Ok(())
+    }
+}
 
 impl PushSrcImpl for ZenohSrc {
-    fn fill(&self, buffer: &mut gst::BufferRef) -> Result<gst::FlowSuccess, gst::FlowError> {
-        gst_base::subclass::prelude::PushSrcImplExt::parent_fill(self, buffer)
-    }
-
-    fn alloc(&self) -> Result<gst::Buffer, gst::FlowError> {
-        gst_base::subclass::prelude::PushSrcImplExt::parent_alloc(self)
-    }
-
     fn create(
         &self,
-        buffer: Option<&mut gst::BufferRef>,
-    ) -> Result<gst_base::subclass::base_src::CreateSuccess, gst::FlowError> {
-        gst_base::subclass::prelude::PushSrcImplExt::parent_create(self, buffer)
+        _buffer: Option<&mut gst::BufferRef>,
+    ) -> Result<CreateSuccess, gst::FlowError> {
+        let state_locked = self.state.lock().unwrap();
+        let State::Started(ref started) = *state_locked else {
+            gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
+            return Err(gst::FlowError::Error);
+        };
+
+        let sample = started.subscriber.recv().unwrap();
+        let payload = sample.payload();
+        let slice = payload.to_bytes();
+
+        let mut buffer = gst::Buffer::with_size(slice.len()).unwrap();
+        buffer
+            .get_mut()
+            .unwrap()
+            .copy_from_slice(0, &slice)
+            .unwrap();
+
+        Ok(CreateSuccess::NewBuffer(buffer))
     }
 }

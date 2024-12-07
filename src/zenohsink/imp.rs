@@ -114,7 +114,7 @@ impl ObjectImpl for ZenohSink {
         let settings = self.settings.lock().unwrap();
 
         match pspec.name() {
-            "server-name" => settings.key_expr.to_value(),
+            "key-expr" => settings.key_expr.to_value(),
             _ => unimplemented!(),
         }
     }

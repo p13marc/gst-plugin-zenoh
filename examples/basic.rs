@@ -8,13 +8,12 @@ async fn main() -> Result<(), Error> {
     gst::init()?;
     gstzenoh::plugin_register_static()?;
 
-    // TODO: replace udp{sink,src} by zenoh{sink,src}
-
     let src_pipeline = gst::parse::launch(
-        "videotestsrc ! openh264enc bitrate=500 ! rtph264pay ! udpsink host=127.0.0.1 port=5000",
+        "videotestsrc ! openh264enc bitrate=500 ! rtph264pay ! zenohsink key-expr=demo/example/gst",
     )?;
+
     let sink_pipeline =
-        gst::parse::launch("udpsrc port=5000 ! application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96 ! rtph264depay ! h264parse ! decodebin ! videoconvert ! autovideosink sync=false
+        gst::parse::launch("zenohsrc key-expr=demo/example/gst ! application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96 ! rtph264depay ! h264parse ! decodebin ! videoconvert ! autovideosink sync=false
 ")?;
 
     let mut stream = select_all([
