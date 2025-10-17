@@ -9,23 +9,25 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 - ✅ **Improved resource management**: Better handling of resource cleanup in stop() methods
 - ✅ **Fixed example code**: Updated example to use GLib's MainLoop instead of Tokio
 - ✅ **Switched to stable dependencies**: Replaced GitLab dependencies with stable crates.io versions
+- ✅ **Fixed compiler warnings**: Added proper #[allow(dead_code)] annotations for unused fields
+- ✅ **Improved error handling**: Added domain-specific error types and proper error propagation
 
 ## Next Steps
 
-1. **Error Handling Improvements**:
-   - Replace `unwrap()` calls with proper error handling
-   - Improve error messages and propagation
-   - Add error recovery mechanisms
-
-2. **Add Configuration Options**:
+1. **Add Configuration Options**:
    - Add Zenoh-specific configuration properties
    - Support different reliability modes
    - Allow timeouts to be configured
 
-3. **Clean Up Warnings**:
-   - Fix unused field warnings
-   - Clean up debug category usage
-   - Improve state management
+2. **Improve Network Resilience**:
+   - Handle network disconnections gracefully
+   - Add reconnection logic
+   - Implement timeout handling for operations
+
+3. **Documentation and Testing**:
+   - Add comprehensive inline documentation
+   - Create examples demonstrating usage patterns
+   - Add unit and integration tests
 
 ## Remaining Tasks
 
@@ -33,9 +35,9 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 
 ### Error Handling
 
-- [ ] Replace all `unwrap()` and `expect()` calls with proper error handling
-- [ ] Implement proper error propagation from Zenoh operations to GStreamer
-- [ ] Add detailed error messages when Zenoh operations fail
+- [x] Replace all `unwrap()` and `expect()` calls with proper error handling
+- [x] Implement proper error propagation from Zenoh operations to GStreamer
+- [x] Add detailed error messages when Zenoh operations fail
 - [ ] Handle network disconnections gracefully
 
 ### Runtime Architecture
@@ -47,7 +49,7 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 ### Resource Management
 
 - [x] Improved Zenoh session cleanup in the `stop()` methods
-- [ ] Add error handling for resource cleanup
+- [x] Add error handling for resource cleanup
 - [ ] Add timeout handling for Zenoh operations
 
 ## Medium Priority
@@ -72,8 +74,8 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 ### Code Quality
 
 - [x] Removed commented-out code from zenohsrc
-- [ ] Fix remaining compiler warnings (unused session fields, unused CAT)
-- [ ] Replace `unimplemented!()` with proper error handling
+- [x] Fix remaining compiler warnings (unused session fields, unused CAT)
+- [x] Replace `unimplemented!()` with proper error handling
 - [ ] Refactor unreachable assertions with better state checking
 
 ## Low Priority

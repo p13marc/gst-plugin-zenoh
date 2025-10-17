@@ -7,11 +7,18 @@ use gst_base::{
 };
 use zenoh::Wait;
 
+use crate::error::{ErrorHandling, FlowErrorHandling, ZenohError};
+
+// Define debug category for logging
+#[allow(dead_code)]
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new("zenohsrc", gst::DebugColorFlags::empty(), Some("Zenoh Src"))
 });
 
 struct Started {
+    // Keeping session field to maintain ownership and prevent session from being dropped
+    // while subscriber is still in use
+    #[allow(dead_code)]
     session: zenoh::Session,
     subscriber:
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
@@ -133,9 +140,14 @@ impl BaseSrcImpl for ZenohSrc {
         let key_expr = settings.key_expr.clone();
         drop(settings);
 
-        // Use Zenoh's synchronous API with wait()
-        let session = zenoh::open(zenoh::Config::default()).wait().unwrap();
-        let subscriber = session.declare_subscriber(key_expr).wait().unwrap();
+        // Use Zenoh's synchronous API with wait(), with proper error handling
+        let session = zenoh::open(zenoh::Config::default())
+            .wait()
+            .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+            
+        let subscriber = session.declare_subscriber(key_expr)
+            .wait()
+            .map_err(|e| ZenohError::InitError(e).to_error_message())?;
 
         *state = State::Started(Started {
             session,
@@ -164,17 +176,33 @@ impl PushSrcImpl for ZenohSrc {
             return Err(gst::FlowError::Error);
         };
 
-        // Use Zenoh's synchronous API
-        let sample = started.subscriber.recv().unwrap();
+        // Use Zenoh's synchronous API with proper error handling
+        let sample = started.subscriber.recv()
+            .map_err(|e| {
+                let err = ZenohError::ReceiveError(e.to_string());
+                gst::element_imp_error!(self, gst::ResourceError::Read, ["{}", err]);
+                err.to_flow_error()
+            })?;
+        
         let payload = sample.payload();
         let slice = payload.to_bytes();
 
-        let mut buffer = gst::Buffer::with_size(slice.len()).unwrap();
-        buffer
-            .get_mut()
-            .unwrap()
+        let mut buffer = gst::Buffer::with_size(slice.len())
+            .map_err(|_| {
+                gst::element_imp_error!(self, gst::ResourceError::Failed, ["Failed to allocate buffer"]);
+                gst::FlowError::Error
+            })?;
+            
+        buffer.get_mut()
+            .ok_or_else(|| {
+                gst::element_imp_error!(self, gst::ResourceError::Failed, ["Failed to get mutable buffer reference"]);
+                gst::FlowError::Error
+            })?
             .copy_from_slice(0, &slice)
-            .unwrap();
+            .map_err(|_| {
+                gst::element_imp_error!(self, gst::ResourceError::Failed, ["Failed to copy data to buffer"]);
+                gst::FlowError::Error
+            })?;
 
         Ok(CreateSuccess::NewBuffer(buffer))
     }

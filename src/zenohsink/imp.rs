@@ -5,6 +5,8 @@ use gst_base::subclass::prelude::*;
 use zenoh::Wait;
 use zenoh::key_expr::OwnedKeyExpr;
 
+use crate::error::{ErrorHandling, FlowErrorHandling, ZenohError};
+
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
         "zenohsink",
@@ -14,6 +16,9 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 });
 
 struct Started {
+    // Keeping session field to maintain ownership and prevent session from being dropped
+    // while publisher is still in use
+    #[allow(dead_code)]
     session: zenoh::Session,
     publisher: zenoh::pubsub::Publisher<'static>,
 }
@@ -139,11 +144,18 @@ impl BaseSinkImpl for ZenohSink {
         let key_expr = settings.key_expr.clone();
         drop(settings);
 
-        // Use Zenoh's synchronous API with wait()
-        let session = zenoh::open(zenoh::Config::default()).wait().unwrap();
-        // Use owned key_expr for static lifetime
-        let owned: OwnedKeyExpr = OwnedKeyExpr::try_from(key_expr).unwrap();
-        let publisher = session.declare_publisher(owned).wait().unwrap();
+        // Use Zenoh's synchronous API with wait(), with proper error handling
+        let session = zenoh::open(zenoh::Config::default())
+            .wait()
+            .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+            
+        // Use owned key_expr for static lifetime, with proper error handling
+        let owned = OwnedKeyExpr::try_from(key_expr)
+            .map_err(|e| ZenohError::KeyExprError(e.to_string()).to_error_message())?;
+            
+        let publisher = session.declare_publisher(owned)
+            .wait()
+            .map_err(|e| ZenohError::PublishError(e).to_error_message())?;
         
         *state = State::Started(Started { 
             session,
@@ -160,11 +172,21 @@ impl BaseSinkImpl for ZenohSink {
             return Err(gst::FlowError::Error);
         };
 
-        // Get buffer data
-        let b = buffer.clone().into_mapped_buffer_readable().unwrap();
+        // Get buffer data with proper error handling
+        let b = buffer.clone().into_mapped_buffer_readable()
+            .map_err(|_| {
+                gst::element_imp_error!(self, gst::ResourceError::Read, ["Failed to map buffer for reading"]);
+                gst::FlowError::Error
+            })?;
         
-        // Send directly using synchronous API
-        started.publisher.put(b.as_slice()).wait().unwrap();
+        // Send directly using synchronous API with proper error handling
+        started.publisher.put(b.as_slice())
+            .wait()
+            .map_err(|e| {
+                let err = ZenohError::PublishError(e);
+                gst::element_imp_error!(self, gst::ResourceError::Write, ["{}", err]);
+                err.to_flow_error()
+            })?;
         Ok(gst::FlowSuccess::Ok)
     }
 

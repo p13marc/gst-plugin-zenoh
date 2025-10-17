@@ -1,5 +1,6 @@
 use gst::glib;
 
+mod error;
 mod utils;
 mod zenohsink;
 mod zenohsrc;
