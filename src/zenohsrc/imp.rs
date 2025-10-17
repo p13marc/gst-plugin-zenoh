@@ -5,8 +5,7 @@ use gst_base::{
     prelude::BaseSrcExt,
     subclass::{base_src::CreateSuccess, prelude::*},
 };
-
-use crate::utils::RUNTIME;
+use zenoh::Wait;
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new("zenohsrc", gst::DebugColorFlags::empty(), Some("Zenoh Src"))
@@ -134,30 +133,16 @@ impl BaseSrcImpl for ZenohSrc {
         let key_expr = settings.key_expr.clone();
         drop(settings);
 
-        *state = {
-            let _enter = RUNTIME.enter();
-            futures::executor::block_on(async move {
-                let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-                let subscriber: zenoh::pubsub::Subscriber<
-                    zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>,
-                > = session.declare_subscriber(key_expr).await.unwrap();
-                State::Started(Started {
-                    session,
-                    subscriber,
-                })
-            })
-        };
+        // Use Zenoh's synchronous API with wait()
+        let session = zenoh::open(zenoh::Config::default()).wait().unwrap();
+        let subscriber = session.declare_subscriber(key_expr).wait().unwrap();
 
-        // *state = RUNTIME.block_on(async move {
-        //     let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-        //     let subscriber: zenoh::pubsub::Subscriber<
-        //         zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>,
-        //     > = session.declare_subscriber(key_expr).await.unwrap();
-        //     State::Started(Started {
-        //         session,
-        //         subscriber,
-        //     })
-        // });
+        *state = State::Started(Started {
+            session,
+            subscriber,
+        });
+
+        // Commented code removed - using wait() instead of async
 
         Ok(())
     }
@@ -179,6 +164,7 @@ impl PushSrcImpl for ZenohSrc {
             return Err(gst::FlowError::Error);
         };
 
+        // Use Zenoh's synchronous API
         let sample = started.subscriber.recv().unwrap();
         let payload = sample.payload();
         let slice = payload.to_bytes();

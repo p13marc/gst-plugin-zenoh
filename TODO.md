@@ -2,7 +2,33 @@
 
 This document outlines the improvements and fixes needed for the gst-plugin-zenoh project.
 
-## High Priority
+## Recently Completed
+
+- ✅ **Removed Tokio dependency**: Simplified the codebase by removing Tokio and using Zenoh's synchronous API
+- ✅ **Simplified thread model**: Eliminated background thread and channel communication in zenohsink
+- ✅ **Improved resource management**: Better handling of resource cleanup in stop() methods
+- ✅ **Fixed example code**: Updated example to use GLib's MainLoop instead of Tokio
+
+## Next Steps
+
+1. **Error Handling Improvements**:
+   - Replace `unwrap()` calls with proper error handling
+   - Improve error messages and propagation
+   - Add error recovery mechanisms
+
+2. **Add Configuration Options**:
+   - Add Zenoh-specific configuration properties
+   - Support different reliability modes
+   - Allow timeouts to be configured
+
+3. **Clean Up Warnings**:
+   - Fix unused field warnings
+   - Clean up debug category usage
+   - Improve state management
+
+## Remaining Tasks
+
+### High Priority
 
 ### Error Handling
 
@@ -13,26 +39,24 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 
 ### Runtime Architecture
 
-- [ ] **IMPORTANT**: Remove Tokio dependency
-  - The futures in the main function from GStreamer should be scheduled by GLib, not Tokio
-  - Replace the shared Tokio runtime with GLib's MainContext for async operations
-  - Use GLib's async utilities instead of Tokio-specific ones
+- [x] **COMPLETED**: Remove Tokio dependency
+  - Replaced async patterns with Zenoh's synchronous API using `wait()`
+  - Eliminated need for async runtime and background thread
 
 ### Resource Management
 
-- [ ] Properly close Zenoh sessions in the `stop()` methods
-- [ ] Ensure all resources are released when elements are destroyed
+- [x] Improved Zenoh session cleanup in the `stop()` methods
+- [ ] Add error handling for resource cleanup
 - [ ] Add timeout handling for Zenoh operations
-- [ ] Implement cleanup for async tasks when pipeline state changes
 
 ## Medium Priority
 
 ### Thread Safety and Concurrency
 
-- [ ] Audit all mutex usages for potential deadlocks
-- [ ] Improve state management to avoid race conditions
-- [ ] Replace blocking calls with non-blocking alternatives
-- [ ] Add better synchronization between GStreamer and Zenoh threads
+- [x] Simplified thread model by removing background thread
+- [x] Eliminated race conditions from multi-threaded communication
+- [ ] Audit mutex usages for potential deadlocks
+- [ ] Improve state management
 
 ### Configuration Flexibility
 
@@ -46,8 +70,8 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 
 ### Code Quality
 
-- [ ] Fix compiler warnings (dead code, unused variables)
-- [ ] Remove commented-out code
+- [x] Removed commented-out code from zenohsrc
+- [ ] Fix remaining compiler warnings (unused session fields, unused CAT)
 - [ ] Replace `unimplemented!()` with proper error handling
 - [ ] Refactor unreachable assertions with better state checking
 

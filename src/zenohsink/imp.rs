@@ -2,9 +2,8 @@ use std::sync::{LazyLock, Mutex};
 
 use gst::{glib, prelude::*, subclass::prelude::*};
 use gst_base::subclass::prelude::*;
-use tokio::sync::mpsc::{self, Sender};
-
-use crate::utils::RUNTIME;
+use zenoh::Wait;
+use zenoh::key_expr::OwnedKeyExpr;
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -15,7 +14,8 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 });
 
 struct Started {
-    sender: Sender<gst::Buffer>,
+    session: zenoh::Session,
+    publisher: zenoh::pubsub::Publisher<'static>,
 }
 
 #[derive(Default)]
@@ -139,17 +139,15 @@ impl BaseSinkImpl for ZenohSink {
         let key_expr = settings.key_expr.clone();
         drop(settings);
 
-        let (tx, mut rx) = mpsc::channel(32);
-
-        *state = State::Started(Started { sender: tx });
-
-        RUNTIME.spawn(async move {
-            let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-            let publisher = session.declare_publisher(&key_expr).await.unwrap();
-            while let Some(buffer) = rx.recv().await {
-                let b = buffer.into_mapped_buffer_readable().unwrap();
-                publisher.put(b.as_slice()).await.unwrap();
-            }
+        // Use Zenoh's synchronous API with wait()
+        let session = zenoh::open(zenoh::Config::default()).wait().unwrap();
+        // Use owned key_expr for static lifetime
+        let owned: OwnedKeyExpr = OwnedKeyExpr::try_from(key_expr).unwrap();
+        let publisher = session.declare_publisher(owned).wait().unwrap();
+        
+        *state = State::Started(Started { 
+            session,
+            publisher,
         });
 
         Ok(())
@@ -162,13 +160,22 @@ impl BaseSinkImpl for ZenohSink {
             return Err(gst::FlowError::Error);
         };
 
-        started.sender.blocking_send(buffer.clone()).unwrap();
+        // Get buffer data
+        let b = buffer.clone().into_mapped_buffer_readable().unwrap();
+        
+        // Send directly using synchronous API
+        started.publisher.put(b.as_slice()).wait().unwrap();
         Ok(gst::FlowSuccess::Ok)
     }
 
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
-        *self.state.lock().unwrap() = State::Stopped;
-
+        // Get current state and properly clean up resources
+        let mut state = self.state.lock().unwrap();
+        if let State::Started(ref _started) = *state {
+            // No explicit cleanup needed, drop will handle it
+            *state = State::Stopped;
+        }
+        
         Ok(())
     }
 
