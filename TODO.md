@@ -8,6 +8,7 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 - ✅ **Simplified thread model**: Eliminated background thread and channel communication in zenohsink
 - ✅ **Improved resource management**: Better handling of resource cleanup in stop() methods
 - ✅ **Fixed example code**: Updated example to use GLib's MainLoop instead of Tokio
+- ✅ **Switched to stable dependencies**: Replaced GitLab dependencies with stable crates.io versions
 
 ## Next Steps
 
@@ -79,7 +80,7 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 
 ### Compatibility and Maintenance
 
-- [ ] Pin gstreamer-rs dependency to a stable version instead of branch
+- [x] Pin gstreamer-rs dependency to a stable version from crates.io
 - [ ] Create a compatibility matrix for supported versions
 - [ ] Add continuous integration for different Zenoh/GStreamer versions
 
