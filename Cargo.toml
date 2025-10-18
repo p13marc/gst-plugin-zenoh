@@ -13,11 +13,13 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-zenoh = "1"
+zenoh = { version = "1", features = ["unstable"] }
+zenoh-config = "1"
 thiserror = "2.0.4"
 gst = { package = "gstreamer", version = "0.24.2" }
 gst-base = { package = "gstreamer-base", version = "0.24.2" }
 futures = "0.3.30"
+anyhow = "1"
 
 
 [dev-dependencies]

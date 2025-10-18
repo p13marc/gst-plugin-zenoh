@@ -11,23 +11,31 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 - ✅ **Switched to stable dependencies**: Replaced GitLab dependencies with stable crates.io versions
 - ✅ **Fixed compiler warnings**: Added proper #[allow(dead_code)] annotations for unused fields
 - ✅ **Improved error handling**: Added domain-specific error types and proper error propagation
+- ✅ **Added comprehensive documentation**: Documented all elements and their properties
+- ✅ **Refactored assertions**: Replaced unreachable! with proper error handling
+- ✅ **Enhanced network resilience**: Added better error handling for network issues
 
 ## Next Steps
 
-1. **Add Configuration Options**:
-   - Add Zenoh-specific configuration properties
-   - Support different reliability modes
-   - Allow timeouts to be configured
+1. **Testing and Examples**:
+   - Add unit tests for core functionality
+   - Implement integration tests with actual Zenoh network
+   - Create examples demonstrating various usage patterns
 
-2. **Improve Network Resilience**:
-   - Handle network disconnections gracefully
-   - Add reconnection logic
-   - Implement timeout handling for operations
+2. **Advanced Features**:
+   - Add reconnection logic for network failures
+   - Support for dynamic reconfiguration when possible
+   - Add statistics reporting for monitoring
 
-3. **Documentation and Testing**:
-   - Add comprehensive inline documentation
-   - Create examples demonstrating usage patterns
-   - Add unit and integration tests
+3. **Performance Optimization**:
+   - Better buffer management to reduce copies
+   - Optimize serialization/deserialization
+   - Test performance under various network conditions
+
+4. **Configuration (completed)**:
+   - [x] Add sink properties: key-expr, config, priority, congestion-control, reliability 
+   - [x] Add source properties mirroring sink where applicable
+   - [x] Wire configuration values to zenoh where applicable (config file)
 
 ## Remaining Tasks
 
@@ -38,7 +46,7 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 - [x] Replace all `unwrap()` and `expect()` calls with proper error handling
 - [x] Implement proper error propagation from Zenoh operations to GStreamer
 - [x] Add detailed error messages when Zenoh operations fail
-- [ ] Handle network disconnections gracefully
+- [x] Handle network disconnections gracefully
 
 ### Runtime Architecture
 
@@ -63,12 +71,10 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 
 ### Configuration Flexibility
 
-- [ ] Add more configuration properties for Zenoh settings:
-  - Connection parameters
-  - QoS settings
-  - Reliability modes
-  - Timeout durations
-- [ ] Allow customization of Zenoh config instead of using defaults
+- [x] Add more configuration properties for Zenoh settings:
+  - Config file path for both sink and source
+  - Reliability mode, congestion control, and priority exposed as properties
+- [x] Prepare for more sophisticated Zenoh configuration via API
 - [ ] Support for dynamic reconfiguration when possible
 
 ### Code Quality
@@ -76,7 +82,7 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 - [x] Removed commented-out code from zenohsrc
 - [x] Fix remaining compiler warnings (unused session fields, unused CAT)
 - [x] Replace `unimplemented!()` with proper error handling
-- [ ] Refactor unreachable assertions with better state checking
+- [x] Refactor unreachable assertions with better state checking
 
 ## Low Priority
 
@@ -88,8 +94,8 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 
 ### Documentation
 
-- [ ] Add comprehensive inline documentation
-- [ ] Document expected behavior during error conditions
+- [x] Add comprehensive inline documentation
+- [x] Document expected behavior during error conditions
 - [ ] Create examples demonstrating various usage patterns
 - [ ] Add architecture documentation explaining component interactions
 

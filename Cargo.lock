@@ -827,6 +827,7 @@ dependencies = [
  "gstreamer-base",
  "thiserror 2.0.17",
  "zenoh",
+ "zenoh-config",
 ]
 
 [[package]]

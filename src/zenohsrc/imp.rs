@@ -31,9 +31,25 @@ enum State {
     Started(Started),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Settings {
     key_expr: String,
+    config_file: Option<String>,
+    priority: i32,
+    congestion_control: String,
+    reliability: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            key_expr: String::new(),
+            config_file: None,
+            priority: 0,
+            congestion_control: "block".into(),
+            reliability: "best-effort".into(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -84,10 +100,42 @@ impl ElementImpl for ZenohSrc {
 impl ObjectImpl for ZenohSrc {
     fn properties() -> &'static [glib::ParamSpec] {
         static PROPERTIES: LazyLock<Vec<glib::ParamSpec>> = LazyLock::new(|| {
-            vec![glib::ParamSpecString::builder("key-expr")
-                .nick("key expression")
-                .blurb("Key expression to where to received data")
-                .build()]
+            vec![
+                // Key expression property
+                glib::ParamSpecString::builder("key-expr")
+                    .nick("key expression")
+                    .blurb("Key expression to where to receive data from")
+                    .build(),
+                    
+                // Config file property
+                glib::ParamSpecString::builder("config")
+                    .nick("config file")
+                    .blurb("Path to Zenoh configuration file")
+                    .build(),
+                    
+                // Priority property
+                glib::ParamSpecInt::builder("priority")
+                    .nick("priority")
+                    .blurb("Priority for the Zenoh subscriber (higher value = higher priority)")
+                    .default_value(0)
+                    .minimum(-100)
+                    .maximum(100)
+                    .build(),
+                    
+                // Congestion control property
+                glib::ParamSpecString::builder("congestion-control")
+                    .nick("congestion control")
+                    .blurb("Congestion control policy (block or drop)")
+                    .default_value(Some("block"))
+                    .build(),
+                    
+                // Reliability property
+                glib::ParamSpecString::builder("reliability")
+                    .nick("reliability")
+                    .blurb("Reliability mode (best-effort or reliable)")
+                    .default_value(Some("best-effort"))
+                    .build(),
+            ]
         });
 
         PROPERTIES.as_ref()
@@ -100,7 +148,39 @@ impl ObjectImpl for ZenohSrc {
             "key-expr" => {
                 settings.key_expr = value.get::<String>().expect("type checked upstream");
             }
-            _ => unimplemented!(),
+            "config" => {
+                settings.config_file = value.get::<Option<String>>().expect("type checked upstream");
+            }
+            "priority" => {
+                settings.priority = value.get::<i32>().expect("type checked upstream");
+            }
+            "congestion-control" => {
+                let control = value.get::<String>().expect("type checked upstream");
+                // Validate value
+                match control.as_str() {
+                    "block" | "drop" => settings.congestion_control = control,
+                    _ => gst::warning!(
+                        CAT,
+                        "Invalid congestion control value '{}', using default",
+                        control
+                    ),
+                }
+            }
+            "reliability" => {
+                let reliability = value.get::<String>().expect("type checked upstream");
+                // Validate value
+                match reliability.as_str() {
+                    "best-effort" | "reliable" => settings.reliability = reliability,
+                    _ => gst::warning!(
+                        CAT,
+                        "Invalid reliability value '{}', using default",
+                        reliability
+                    ),
+                }
+            }
+            name => {
+                gst::warning!(CAT, "Unknown property: {}", name);
+            }
         }
     }
 
@@ -109,7 +189,15 @@ impl ObjectImpl for ZenohSrc {
 
         match pspec.name() {
             "key-expr" => settings.key_expr.to_value(),
-            _ => unimplemented!(),
+            "config" => settings.config_file.to_value(),
+            "priority" => settings.priority.to_value(),
+            "congestion-control" => settings.congestion_control.to_value(),
+            "reliability" => settings.reliability.to_value(),
+            name => {
+                gst::warning!(CAT, "Unknown property: {}", name);
+                // Return an empty string value as default
+                "".to_value()
+            }
         }
     }
 
@@ -133,18 +221,43 @@ impl BaseSrcImpl for ZenohSrc {
         let mut state = self.state.lock().unwrap();
 
         if let State::Started { .. } = *state {
-            unreachable!("ZenohSrc is already started");
+            gst::warning!(CAT, "ZenohSrc is already started, ignoring start request");
+            return Ok(()); // Already started, nothing to do
         }
 
+        // Get settings
         let settings = self.settings.lock().unwrap();
         let key_expr = settings.key_expr.clone();
+        let config_file = settings.config_file.clone();
+        let priority = settings.priority;
+        let congestion_control = settings.congestion_control.clone();
+        let reliability = settings.reliability.clone();
         drop(settings);
-
+        
+        // Validate the key expression
+        if key_expr.is_empty() {
+            return Err(gst::error_msg!(gst::ResourceError::Settings, ["Key expression is required"]));
+        }
+        
+        // Set up Zenoh config with either default or from file
+        let config = match config_file {
+            Some(path) if !path.is_empty() => {
+                gst::debug!(CAT, "Loading Zenoh config from {}", path);
+                zenoh::Config::from_file(&path)
+                    .map_err(|e| ZenohError::InitError(e).to_error_message())?
+            }
+            _ => zenoh::Config::default(),
+        };
+        
         // Use Zenoh's synchronous API with wait(), with proper error handling
-        let session = zenoh::open(zenoh::Config::default())
+        let session = zenoh::open(config)
             .wait()
             .map_err(|e| ZenohError::InitError(e).to_error_message())?;
             
+        gst::debug!(CAT, "Creating subscriber with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'", 
+                  key_expr, priority, congestion_control, reliability);
+                  
+        // Simple subscriber without additional options for now
         let subscriber = session.declare_subscriber(key_expr)
             .wait()
             .map_err(|e| ZenohError::InitError(e).to_error_message())?;
@@ -180,7 +293,14 @@ impl PushSrcImpl for ZenohSrc {
         let sample = started.subscriber.recv()
             .map_err(|e| {
                 let err = ZenohError::ReceiveError(e.to_string());
-                gst::element_imp_error!(self, gst::ResourceError::Read, ["{}", err]);
+                // Check if this is a network-related error
+                let error_msg = e.to_string();
+                if error_msg.contains("timeout") || error_msg.contains("connection") || error_msg.contains("network") {
+                    gst::element_imp_error!(self, gst::ResourceError::Read, 
+                        ["Network error while receiving: {}", err]);
+                } else {
+                    gst::element_imp_error!(self, gst::ResourceError::Read, ["{}", err]);
+                }
                 err.to_flow_error()
             })?;
         
