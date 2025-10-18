@@ -1,4 +1,4 @@
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use gst::{glib, prelude::*, subclass::prelude::*};
 use gst_base::{
@@ -17,11 +17,26 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 
 struct Started {
     // Keeping session field to maintain ownership and prevent session from being dropped
-    // while subscriber is still in use
+    // while subscriber is still in use. This can be either owned or shared.
     #[allow(dead_code)]
-    session: zenoh::Session,
+    session: SessionWrapper,
     subscriber:
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+}
+
+// Wrapper to handle both owned and shared sessions
+enum SessionWrapper {
+    Owned(zenoh::Session),
+    Shared(Arc<zenoh::Session>),
+}
+
+impl SessionWrapper {
+    fn as_session(&self) -> &zenoh::Session {
+        match self {
+            SessionWrapper::Owned(session) => session,
+            SessionWrapper::Shared(session) => session.as_ref(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -58,6 +73,7 @@ struct Settings {
     priority: i32,
     congestion_control: String,
     reliability: String,
+    external_session: Option<Arc<zenoh::Session>>,
 }
 
 impl Default for Settings {
@@ -68,6 +84,7 @@ impl Default for Settings {
             priority: 0,
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
+            external_session: None,
         }
     }
 }
@@ -164,7 +181,7 @@ impl ObjectImpl for ZenohSrc {
     fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
         // Check if we're in a state where property changes are allowed
         let state = self.state.lock().unwrap();
-        if state.is_started() && matches!(pspec.name(), "key-expr" | "config") {
+        if state.is_started() && matches!(pspec.name(), "key-expr" | "config" | "reliability" | "congestion-control" | "priority") {
             gst::warning!(CAT, "Cannot change property '{}' while element is started", pspec.name());
             return;
         }
@@ -278,6 +295,7 @@ impl BaseSrcImpl for ZenohSrc {
         let priority = settings.priority;
         let congestion_control = settings.congestion_control.clone();
         let reliability = settings.reliability.clone();
+        let external_session = settings.external_session.clone();
         drop(settings);
         
         // Validate the key expression
@@ -295,16 +313,31 @@ impl BaseSrcImpl for ZenohSrc {
             _ => zenoh::Config::default(),
         };
         
-        // Use Zenoh's synchronous API with wait(), with proper error handling
-        let session = zenoh::open(config)
-            .wait()
-            .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+        // Use external session if provided, otherwise create a new one
+        let session_wrapper = match external_session {
+            Some(shared_session) => {
+                gst::debug!(CAT, "Using external shared session");
+                SessionWrapper::Shared(shared_session)
+            }
+            None => {
+                gst::debug!(CAT, "Creating new Zenoh session");
+                let session = zenoh::open(config)
+                    .wait()
+                    .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+                SessionWrapper::Owned(session)
+            }
+        };
             
         gst::debug!(CAT, "Creating subscriber with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'", 
                   key_expr, priority, congestion_control, reliability);
+        
+        // Note: Subscriber reliability is typically determined by the matching publisher
+        // The subscriber will automatically adapt to the publisher's reliability mode
+        // So we don't explicitly set reliability on the subscriber side
                   
-        // Simple subscriber without additional options for now
-        let subscriber = session.declare_subscriber(key_expr)
+        // Create subscriber
+        let subscriber = session_wrapper.as_session()
+            .declare_subscriber(key_expr)
             .wait()
             .map_err(|e| ZenohError::InitError(e).to_error_message())?;
 
@@ -321,7 +354,7 @@ impl BaseSrcImpl for ZenohSrc {
         }
         
         *state = State::Started(Started {
-            session,
+            session: session_wrapper,
             subscriber,
         });
         

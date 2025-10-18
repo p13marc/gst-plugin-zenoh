@@ -29,6 +29,10 @@ fn main() -> Result<(), Error> {
     println!("\n=== Example 4: Priority settings ===");
     priority_example()?;
 
+    // Example 5: Express mode settings
+    println!("\n=== Example 5: Express mode settings ===");
+    express_mode_example()?;
+
     // Clean up
     cleanup_sample_config()?;
 
@@ -46,12 +50,13 @@ fn basic_configuration_example() -> Result<(), Error> {
         .property("key-expr", "config/example/basic")
         .build()?;
 
-    // Display current properties
+    // Display current properties including the new express property
     println!("Sink properties:");
     println!("  key-expr: {}", sink.property::<String>("key-expr"));
     println!("  priority: {}", sink.property::<i32>("priority"));
     println!("  congestion-control: {}", sink.property::<String>("congestion-control"));
     println!("  reliability: {}", sink.property::<String>("reliability"));
+    println!("  express: {}", sink.property::<bool>("express"));
 
     println!("Source properties:");
     println!("  key-expr: {}", src.property::<String>("key-expr"));
@@ -172,6 +177,46 @@ fn priority_example() -> Result<(), Error> {
     src_default_priority.set_state(gst::State::Null)?;
 
     println!("Priority settings test completed successfully");
+    Ok(())
+}
+
+fn express_mode_example() -> Result<(), Error> {
+    // Test express mode enabled vs disabled
+    let sink_express = gst::ElementFactory::make("zenohsink")
+        .property("key-expr", "config/example/express")
+        .property("express", true)
+        .property("priority", 10i32)
+        .property("reliability", "reliable")
+        .build()?;
+
+    let sink_normal = gst::ElementFactory::make("zenohsink")
+        .property("key-expr", "config/example/normal")
+        .property("express", false)
+        .property("priority", 10i32)
+        .property("reliability", "reliable")
+        .build()?;
+
+    println!("Express mode examples:");
+    println!("  Express enabled sink:");
+    println!("    express: {}", sink_express.property::<bool>("express"));
+    println!("    priority: {}", sink_express.property::<i32>("priority"));
+    println!("    reliability: {}", sink_express.property::<String>("reliability"));
+    
+    println!("  Normal mode sink:");
+    println!("    express: {}", sink_normal.property::<bool>("express"));
+    println!("    priority: {}", sink_normal.property::<i32>("priority"));
+    println!("    reliability: {}", sink_normal.property::<String>("reliability"));
+
+    // Test state transitions
+    sink_express.set_state(gst::State::Ready)?;
+    sink_normal.set_state(gst::State::Ready)?;
+
+    thread::sleep(Duration::from_millis(100));
+
+    sink_express.set_state(gst::State::Null)?;
+    sink_normal.set_state(gst::State::Null)?;
+
+    println!("Express mode test completed successfully");
     Ok(())
 }
 

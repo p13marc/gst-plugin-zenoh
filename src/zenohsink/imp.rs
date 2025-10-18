@@ -1,8 +1,9 @@
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use gst::{glib, prelude::*, subclass::prelude::*};
 use gst_base::subclass::prelude::*;
 use zenoh::key_expr::OwnedKeyExpr;
+use zenoh::qos::{CongestionControl, Priority, Reliability};
 use zenoh::Wait;
 
 use crate::error::{ErrorHandling, FlowErrorHandling, ZenohError};
@@ -17,10 +18,25 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
 
 struct Started {
     // Keeping session field to maintain ownership and prevent session from being dropped
-    // while publisher is still in use
+    // while publisher is still in use. This can be either owned or shared.
     #[allow(dead_code)]
-    session: zenoh::Session,
+    session: SessionWrapper,
     publisher: zenoh::pubsub::Publisher<'static>,
+}
+
+// Wrapper to handle both owned and shared sessions
+enum SessionWrapper {
+    Owned(zenoh::Session),
+    Shared(Arc<zenoh::Session>),
+}
+
+impl SessionWrapper {
+    fn as_session(&self) -> &zenoh::Session {
+        match self {
+            SessionWrapper::Owned(session) => session,
+            SessionWrapper::Shared(session) => session.as_ref(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -57,6 +73,8 @@ struct Settings {
     priority: i32,
     congestion_control: String,
     reliability: String,
+    express: bool,
+    external_session: Option<Arc<zenoh::Session>>,
 }
 
 impl Default for Settings {
@@ -67,6 +85,8 @@ impl Default for Settings {
             priority: 0,
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
+            express: false,
+            external_session: None,
         }
     }
 }
@@ -166,6 +186,12 @@ impl ObjectImpl for ZenohSink {
                     .blurb("Reliability mode (best-effort or reliable)")
                     .default_value(Some("best-effort"))
                     .build(),
+                // Express mode property
+                glib::ParamSpecBoolean::builder("express")
+                    .nick("express mode")
+                    .blurb("Enable express mode for the publisher (bypasses some queues for lower latency)")
+                    .default_value(false)
+                    .build(),
             ]
         });
 
@@ -175,7 +201,7 @@ impl ObjectImpl for ZenohSink {
     fn set_property(&self, _id: usize, value: &gst::glib::Value, pspec: &gst::glib::ParamSpec) {
         // Check if we're in a state where property changes are allowed
         let state = self.state.lock().unwrap();
-        if state.is_started() && matches!(pspec.name(), "key-expr" | "config") {
+        if state.is_started() && matches!(pspec.name(), "key-expr" | "config" | "express" | "reliability" | "congestion-control" | "priority") {
             gst::warning!(CAT, "Cannot change property '{}' while element is started", pspec.name());
             return;
         }
@@ -219,6 +245,9 @@ impl ObjectImpl for ZenohSink {
                     ),
                 }
             }
+            "express" => {
+                settings.express = value.get::<bool>().expect("type checked upstream");
+            }
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
             }
@@ -234,6 +263,7 @@ impl ObjectImpl for ZenohSink {
             "priority" => settings.priority.to_value(),
             "congestion-control" => settings.congestion_control.to_value(),
             "reliability" => settings.reliability.to_value(),
+            "express" => settings.express.to_value(),
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
                 // Return an empty string value as default
@@ -283,6 +313,8 @@ impl BaseSinkImpl for ZenohSink {
         let priority = settings.priority;
         let congestion_control = settings.congestion_control.clone();
         let reliability = settings.reliability.clone();
+        let express = settings.express;
+        let external_session = settings.external_session.clone();
         drop(settings);
 
         // Validate the key expression
@@ -303,31 +335,64 @@ impl BaseSinkImpl for ZenohSink {
             _ => zenoh::Config::default(),
         };
 
-        // Use Zenoh's synchronous API with wait(), with proper error handling
-        let session = zenoh::open(config)
-            .wait()
-            .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+        // Use external session if provided, otherwise create a new one
+        let session_wrapper = match external_session {
+            Some(shared_session) => {
+                gst::debug!(CAT, "Using external shared session");
+                SessionWrapper::Shared(shared_session)
+            }
+            None => {
+                gst::debug!(CAT, "Creating new Zenoh session");
+                let session = zenoh::open(config)
+                    .wait()
+                    .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+                SessionWrapper::Owned(session)
+            }
+        };
 
-        gst::debug!(CAT, "Creating publisher with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'",
-                  key_expr, priority, congestion_control, reliability);
+        gst::debug!(CAT, "Creating publisher with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
+                  key_expr, priority, congestion_control, reliability, express);
 
         // Use owned key_expr for static lifetime, with proper error handling
         let owned = OwnedKeyExpr::try_from(key_expr.clone())
             .map_err(|e| ZenohError::KeyExprError(e.to_string()).to_error_message())?;
 
-        // Create publisher with configuration options
-        // Note: We intentionally don't set priority/reliability/congestion control yet
-        // As these require detailed knowledge of the specific Zenoh API version
-        // The properties are exposed in the GStreamer API for future compatibility
+        // Parse configuration options
+        let zenoh_priority = Priority::try_from(priority as u8).unwrap_or(Priority::default());
+        let zenoh_congestion_control = match congestion_control.as_str() {
+            "block" => CongestionControl::Block,
+            "drop" => CongestionControl::Drop,
+            _ => {
+                gst::warning!(CAT, "Unknown congestion control '{}', using default", congestion_control);
+                CongestionControl::Block
+            }
+        };
+        let zenoh_reliability = match reliability.as_str() {
+            "reliable" => Reliability::Reliable,
+            "best-effort" => Reliability::BestEffort,
+            _ => {
+                gst::warning!(CAT, "Unknown reliability '{}', using default", reliability);
+                Reliability::BestEffort
+            }
+        };
 
-        // Create publisher now
-        let publisher = session
+        // Create publisher with configuration options
+        let mut publisher_builder = session_wrapper.as_session()
             .declare_publisher(owned)
+            .priority(zenoh_priority)
+            .congestion_control(zenoh_congestion_control)
+            .reliability(zenoh_reliability);
+        
+        if express {
+            publisher_builder = publisher_builder.express(true);
+        }
+
+        let publisher = publisher_builder
             .wait()
             .map_err(|e| ZenohError::PublishError(e).to_error_message())?;
 
-        gst::debug!(CAT, "Publisher created with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'",
-            key_expr, priority, congestion_control, reliability);
+        gst::debug!(CAT, "Publisher created with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
+            key_expr, priority, congestion_control, reliability, express);
 
         // Reacquire state lock to complete transition
         let mut state = self.state.lock().unwrap();
@@ -341,7 +406,7 @@ impl BaseSinkImpl for ZenohSink {
             ));
         }
         
-        *state = State::Started(Started { session, publisher });
+        *state = State::Started(Started { session: session_wrapper, publisher });
         gst::debug!(CAT, "ZenohSink successfully transitioned to Started state");
 
         Ok(())

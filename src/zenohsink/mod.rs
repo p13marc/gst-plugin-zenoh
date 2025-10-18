@@ -9,11 +9,21 @@
 //! * `priority` - Publisher priority (-100 to 100, default: 0)
 //! * `congestion-control` - Congestion control policy: "block" or "drop" (default: "block")
 //! * `reliability` - Reliability mode: "best-effort" or "reliable" (default: "best-effort")
+//! * `express` - Enable express mode for lower latency (bypasses some queues, default: false)
 //!
-//! ## Example Pipeline
+//! ## Example Pipelines
 //! 
 //! ```bash
+//! # Basic usage
 //! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/stream
+//!
+//! # With reliability and express mode
+//! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/reliable \
+//!   reliability=reliable congestion-control=block express=true priority=10
+//!
+//! # Best-effort with drop congestion control
+//! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/besteffort \
+//!   reliability=best-effort congestion-control=drop
 //! ```
 
 use gst::glib;
