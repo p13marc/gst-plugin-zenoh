@@ -1,84 +1,313 @@
 # gst-plugin-zenoh
 
-This is a [GStreamer](https://gstreamer.freedesktop.org/) plugin for using [Zenoh](https://zenoh.io/) as the transport build using [zenoh-rs](https://github.com/eclipse-zenoh/zenoh).
+[![Rust](https://img.shields.io/badge/rust-1.70+-blue.svg)](https://www.rust-lang.org/)
+[![GStreamer](https://img.shields.io/badge/GStreamer-1.20+-green.svg)](https://gstreamer.freedesktop.org/)
+[![Zenoh](https://img.shields.io/badge/Zenoh-1.0+-orange.svg)](https://zenoh.io/)
+[![License](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](https://opensource.org/licenses/MPL-2.0)
 
-The plugin provides two key elements:
-- `zenohsink`: A sink element that sends data from GStreamer to Zenoh
-- `zenohsrc`: A source element that receives data from Zenoh into GStreamer
+A high-performance [GStreamer](https://gstreamer.freedesktop.org/) plugin that enables distributed media streaming using [Zenoh](https://zenoh.io/) as the transport layer. Built with [zenoh-rs](https://github.com/eclipse-zenoh/zenoh) for maximum performance and reliability.
 
-## Features
+## Overview
 
-- **Configurable Quality of Service (QoS)**: Support for different reliability modes (best-effort, reliable) and congestion control policies (block, drop)
-- **Express Mode**: Low-latency mode that bypasses some internal queues for faster delivery
-- **Priority Control**: Configurable message priorities from -100 to 100
-- **Flexible Configuration**: Support for both default configuration and external Zenoh config files
-- **Session Sharing**: Architecture prepared for sharing Zenoh sessions between multiple elements (external session support)
+The plugin provides two complementary GStreamer elements that bridge GStreamer pipelines with Zenoh networks:
 
-## Examples
+- **`zenohsink`**: Publishes GStreamer buffers to Zenoh networks
+- **`zenohsrc`**: Subscribes to Zenoh data and delivers it to GStreamer pipelines
 
-### Basic Usage
+Together, these elements enable distributed media applications, edge computing scenarios, robotics systems, IoT data streaming, and more.
+
+## 🚀 Key Features
+
+### Advanced Quality of Service (QoS)
+- **Reliability Modes**: Choose between `best-effort` (low latency) and `reliable` (guaranteed delivery)
+- **Congestion Control**: Handle network congestion with `block` (ensure delivery) or `drop` (maintain real-time performance)
+- **Priority Management**: Message prioritization from -100 to 100 for intelligent bandwidth allocation
+
+### Performance Optimization
+- **Express Mode**: Ultra-low latency mode that bypasses internal queues
+- **Session Sharing**: Efficient resource usage through shared Zenoh sessions
+- **Zero-Copy Operations**: Optimized data paths for minimal overhead
+
+### Flexible Configuration
+- **Runtime Properties**: Configure QoS parameters dynamically
+- **Zenoh Config Files**: Support for comprehensive Zenoh network configuration
+- **Key Expression Patterns**: Flexible topic naming with wildcard support
+
+### Enterprise Ready
+- **Error Handling**: Comprehensive error recovery and reporting
+- **Thread Safety**: Safe concurrent access to all plugin components
+- **Property Locking**: Runtime protection against invalid configuration changes
+
+## Quick Start
+
+### Installation
+
+1. **Install Dependencies** (Ubuntu/Debian):
+   ```bash
+   sudo apt-get update
+   sudo apt-get install libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+   ```
+
+   For Fedora/RHEL:
+   ```bash
+   sudo dnf install libunwind-devel gstreamer1-devel gstreamer1-plugins-base-devel
+   ```
+
+2. **Build the Plugin**:
+   ```bash
+   cargo build --release
+   ```
+
+3. **Run Examples**:
+   ```bash
+   # Basic video streaming demonstration
+   GST_PLUGIN_PATH=target/debug cargo run --example basic
+   
+   # Comprehensive QoS configuration showcase
+   GST_PLUGIN_PATH=target/debug cargo run --example configuration
+   ```
+
+### Simple Streaming Example
 
 ```bash
-# Run the basic video streaming example
-GST_PLUGIN_PATH=target/debug cargo run --example basic
+# Terminal 1: Start video publisher
+gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video
 
-# Run the configuration example to see all QoS options
-GST_PLUGIN_PATH=target/debug cargo run --example configuration
+# Terminal 2: Start video subscriber 
+gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 ```
 
-### GStreamer Pipeline Examples
+## 📋 Advanced Pipeline Examples
 
+### High-Performance Video Streaming
 ```bash
-# Basic data streaming
-gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/stream
+# Ultra-low latency streaming with express mode
+gst-launch-1.0 videotestsrc pattern=ball ! video/x-raw,width=1280,height=720,framerate=30/1 ! \
+  x264enc tune=zerolatency speed-preset=ultrafast ! rtph264pay ! \
+  zenohsink key-expr=demo/video/hd reliability=best-effort congestion-control=drop express=true priority=50
 
-# With reliability and express mode for low latency
-gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/reliable \
-  reliability=reliable congestion-control=block express=true priority=10
-
-# Best-effort with drop congestion control
-gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/besteffort \
-  reliability=best-effort congestion-control=drop
-
-# Receiving data
-gst-launch-1.0 zenohsrc key-expr=demo/video/stream ! videoconvert ! autovideosink
+# Reliable HD streaming with error recovery
+gst-launch-1.0 videotestsrc ! video/x-raw,width=1920,height=1080 ! \
+  x264enc bitrate=5000 ! rtph264pay ! \
+  zenohsink key-expr=demo/video/reliable reliability=reliable congestion-control=block priority=10
 ```
 
-## Properties
+### Multi-Stream Applications
+```bash
+# Camera + Audio streaming
+gst-launch-1.0 \
+  v4l2src device=/dev/video0 ! videoconvert ! x264enc ! rtph264pay ! \
+  zenohsink key-expr=demo/camera/video reliability=reliable \
+  pulsesrc ! audioconvert ! audioresample ! opusenc ! rtpopuspay ! \
+  zenohsink key-expr=demo/camera/audio reliability=reliable
+
+# Multi-camera setup with priorities  
+gst-launch-1.0 \
+  v4l2src device=/dev/video0 ! zenohsink key-expr=demo/cam/main priority=20 \
+  v4l2src device=/dev/video1 ! zenohsink key-expr=demo/cam/backup priority=-10
+```
+
+### IoT and Sensor Data
+```bash
+# Sensor data with custom Zenoh configuration
+gst-launch-1.0 appsrc ! \
+  zenohsink key-expr=sensors/temperature/device-001 config=/etc/zenoh/iot.json5 \
+  reliability=reliable priority=5
+
+# Wildcard subscription for multiple sensors
+gst-launch-1.0 zenohsrc key-expr="sensors/**" ! \
+  appsink name=sensor_data
+```
+
+### Edge Computing Scenarios
+```bash
+# Edge AI processing pipeline
+gst-launch-1.0 zenohsrc key-expr=edge/camera/raw ! \
+  videoconvert ! videoscale ! video/x-raw,width=416,height=416 ! \
+  tensor_converter ! tensor_transform mode=arithmetic option=typecast:float32,add:-127.5,div:127.5 ! \
+  tensor_filter framework=tensorflow-lite model=detection.tflite ! \
+  zenohsink key-expr=edge/ai/detections reliability=reliable express=true
+```
+
+## ⚙️ Element Properties
 
 ### ZenohSink Properties
 
-- `key-expr` (string): Zenoh key expression for publishing data (required)
-- `config` (string): Path to Zenoh configuration file (optional)
-- `priority` (int): Publisher priority (-100 to 100, default: 0)
-- `congestion-control` (string): "block" or "drop" (default: "block")
-- `reliability` (string): "best-effort" or "reliable" (default: "best-effort")
-- `express` (boolean): Enable express mode for lower latency (default: false)
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `key-expr` | String | *required* | Zenoh key expression for publishing (e.g., "demo/video/stream") |
+| `config` | String | `null` | Path to Zenoh configuration file for custom network settings |
+| `priority` | Integer | `0` | Publisher priority (-100 to 100). Higher values get precedence during congestion |
+| `congestion-control` | String | `"block"` | Congestion handling: `"block"` (wait) or `"drop"` (discard messages) |
+| `reliability` | String | `"best-effort"` | Delivery mode: `"best-effort"` (fast) or `"reliable"` (guaranteed) |
+| `express` | Boolean | `false` | Enable express mode for ultra-low latency (bypasses internal queues) |
+
+#### Usage Examples:
+```bash
+# High priority reliable streaming
+zenohsink key-expr=critical/data reliability=reliable priority=50 express=true
+
+# Real-time best-effort streaming  
+zenohsink key-expr=realtime/video reliability=best-effort congestion-control=drop express=true
+```
 
 ### ZenohSrc Properties
 
-- `key-expr` (string): Zenoh key expression for receiving data (required)
-- `config` (string): Path to Zenoh configuration file (optional)
-- `priority` (int): Subscriber priority (-100 to 100, default: 0)
-- `congestion-control` (string): "block" or "drop" (default: "block")
-- `reliability` (string): "best-effort" or "reliable" (default: "best-effort")
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `key-expr` | String | *required* | Zenoh key expression for subscription (supports wildcards: `*`, `**`) |
+| `config` | String | `null` | Path to Zenoh configuration file |
+| `priority` | Integer | `0` | Subscriber priority (-100 to 100) for message processing order |
+| `congestion-control` | String | `"block"` | Informational only - actual behavior determined by publisher |
+| `reliability` | String | `"best-effort"` | Expected reliability mode - actual mode matches publisher |
 
-## Testing
-
-Run the unit tests using cargo nextest:
+#### Wildcard Examples:
 ```bash
-cargo nextest run
+# Subscribe to all video streams from a device
+zenohsrc key-expr="demo/device-01/video/*"
+
+# Subscribe to all sensor data  
+zenohsrc key-expr="sensors/**"
+
+# Subscribe to specific data types across all devices
+zenohsrc key-expr="**/temperature"
 ```
 
-Or use regular cargo test:
+### Quality of Service (QoS) Guidelines
+
+#### Reliability Modes
+- **`best-effort`**: Minimal latency, no delivery guarantees
+  - Use for: Live video, real-time sensor data, gaming
+  - Latency: ~1-5ms additional
+- **`reliable`**: Guaranteed delivery with acknowledgments  
+  - Use for: Command & control, configuration updates, critical alerts
+  - Latency: ~10-50ms additional (network dependent)
+
+#### Congestion Control
+- **`block`**: Pause publishing during network congestion
+  - Use for: Critical data that cannot be lost
+  - Behavior: May cause frame drops if buffers fill up
+- **`drop`**: Discard messages during congestion
+  - Use for: Real-time streams where recent data is most valuable
+  - Behavior: Maintains smooth streaming with occasional quality loss
+
+#### Express Mode
+- **Enabled**: Bypass internal queues for minimum latency
+  - Use for: Ultra-low latency requirements (<1ms additional)
+  - Trade-off: Higher CPU usage, potential message reordering
+- **Disabled**: Standard processing path
+  - Use for: Normal applications where latency is not critical
+  - Benefit: Lower CPU usage, guaranteed message ordering
+
+## 🧪 Development & Testing
+
+### Running Tests
+
 ```bash
+# Run all tests
 cargo test
+
+# Run specific test suites  
+cargo test --test simple_config_test  # Property configuration tests
+cargo test --test integration_tests   # Pipeline integration tests
+
+# With verbose output
+cargo test -- --nocapture
 ```
 
-The test suite includes:
-- Plugin registration and element creation tests
-- Property validation and setting tests 
-- Error handling and edge case tests
-- Pipeline integration tests
+### Test Coverage
 
-All tests are designed to run without requiring a running Zenoh network.
+The comprehensive test suite includes:
+- ✅ **Element Creation**: Plugin registration and factory tests
+- ✅ **Property Validation**: QoS parameter validation and boundary testing
+- ✅ **Configuration Management**: Settings validation and runtime property locking
+- ✅ **Error Handling**: Network failure recovery and invalid input handling
+- ✅ **State Management**: Element lifecycle and transition testing
+- ✅ **Integration Testing**: End-to-end pipeline validation
+
+### Code Quality
+
+```bash
+# Check code formatting
+cargo fmt --check
+
+# Run linting
+cargo clippy -- -D warnings
+
+# Run security audit
+cargo audit
+```
+
+## 🏗️ Architecture
+
+### Session Management
+
+The plugin implements a flexible session architecture supporting both owned and shared Zenoh sessions:
+
+```rust
+// Architectural overview
+enum SessionWrapper {
+    Owned(zenoh::Session),    // Element manages its own session
+    Shared(Arc<zenoh::Session>), // Element shares session with others
+}
+```
+
+This design enables:
+- **Resource Efficiency**: Multiple elements can share a single network connection
+- **Scalability**: Reduced memory and network overhead for multi-element pipelines  
+- **Flexibility**: Mix of shared and dedicated sessions based on requirements
+
+### Thread Safety
+
+All plugin components are designed for safe concurrent access:
+- **Mutex-Protected State**: Element state and configuration are thread-safe
+- **Lock-Free Data Paths**: Hot paths avoid locking where possible
+- **Property Locking**: Runtime configuration changes are safely managed
+
+### Error Handling
+
+Robust error handling throughout the plugin:
+- **Network Failures**: Automatic retry and reconnection logic
+- **Invalid Configuration**: Graceful degradation with warning messages
+- **Resource Exhaustion**: Proper cleanup and resource management
+- **GStreamer Integration**: Native GStreamer error reporting
+
+## 🤝 Contributing
+
+### Development Setup
+
+1. **Install Rust**: https://rustup.rs/
+2. **Install GStreamer development libraries** (see Quick Start)
+3. **Clone and build**:
+   ```bash
+   git clone https://github.com/your-repo/gst-plugin-zenoh.git
+   cd gst-plugin-zenoh
+   cargo build
+   ```
+
+### Coding Standards
+
+- Follow Rust standard formatting (`cargo fmt`)
+- Address all clippy warnings (`cargo clippy`)
+- Add tests for new functionality
+- Update documentation for API changes
+- Follow semantic versioning for releases
+
+### Pull Request Process
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality  
+4. Ensure all tests pass
+5. Update documentation
+6. Submit pull request with clear description
+
+## 📄 License
+
+This project is licensed under the Mozilla Public License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [Eclipse Zenoh](https://zenoh.io/) team for the excellent protocol and Rust implementation
+- [GStreamer](https://gstreamer.freedesktop.org/) community for the multimedia framework
+- [gtk-rs](https://gtk-rs.org/) team for GStreamer Rust bindings

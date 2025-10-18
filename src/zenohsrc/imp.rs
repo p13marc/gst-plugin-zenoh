@@ -24,13 +24,20 @@ struct Started {
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
 }
 
-// Wrapper to handle both owned and shared sessions
+/// Wrapper to handle both owned and shared Zenoh sessions.
+/// 
+/// This allows the plugin to either create its own session or use
+/// a shared session provided externally, enabling session reuse
+/// across multiple GStreamer elements.
 enum SessionWrapper {
+    /// Element owns the session exclusively
     Owned(zenoh::Session),
+    /// Element shares a session with other components
     Shared(Arc<zenoh::Session>),
 }
 
 impl SessionWrapper {
+    /// Get a reference to the underlying Zenoh session
     fn as_session(&self) -> &zenoh::Session {
         match self {
             SessionWrapper::Owned(session) => session,
@@ -66,13 +73,23 @@ impl State {
     }
 }
 
+/// Configuration settings for the ZenohSrc element.
+/// 
+/// These settings control how the element connects to and subscribes
+/// to data from the Zenoh network protocol.
 #[derive(Debug)]
 struct Settings {
+    /// Zenoh key expression for subscribing to data (required)
     key_expr: String,
+    /// Optional path to Zenoh configuration file
     config_file: Option<String>,
+    /// Subscriber priority (-100 to 100, higher = more priority)
     priority: i32,
+    /// Congestion control policy: "block" or "drop" (informational for subscriber)
     congestion_control: String,
+    /// Reliability mode: "best-effort" or "reliable" (matches publisher settings)
     reliability: String,
+    /// Optional external Zenoh session to share with other elements
     external_session: Option<Arc<zenoh::Session>>,
 }
 
@@ -89,9 +106,22 @@ impl Default for Settings {
     }
 }
 
+/// GStreamer ZenohSrc element implementation.
+/// 
+/// This element subscribes to data from a Zenoh network using the
+/// configured key expression and delivers it as GStreamer buffers
+/// to downstream elements.
+/// 
+/// The element supports:
+/// - Configurable subscription parameters
+/// - Session sharing capabilities  
+/// - Automatic reliability adaptation (matches publisher)
+/// - Priority-based message handling
 #[derive(Default)]
 pub struct ZenohSrc {
+    /// Element configuration settings
     settings: Mutex<Settings>,
+    /// Current operational state
     state: Mutex<State>,
 }
 
@@ -331,9 +361,12 @@ impl BaseSrcImpl for ZenohSrc {
         gst::debug!(CAT, "Creating subscriber with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'", 
                   key_expr, priority, congestion_control, reliability);
         
-        // Note: Subscriber reliability is typically determined by the matching publisher
-        // The subscriber will automatically adapt to the publisher's reliability mode
-        // So we don't explicitly set reliability on the subscriber side
+        // Note: Zenoh subscriber reliability is automatically determined by the publisher
+        // 
+        // Unlike publishers, subscribers don't explicitly configure reliability modes.
+        // Instead, they automatically adapt to match the reliability mode of the
+        // publisher they're receiving from. This ensures consistent delivery guarantees
+        // across the pub-sub connection without requiring manual coordination.
                   
         // Create subscriber
         let subscriber = session_wrapper.as_session()

@@ -1,29 +1,70 @@
 //! # ZenohSink Element
 //!
 //! The ZenohSink element sends GStreamer buffers over the Zenoh network protocol.
+//! It acts as a bridge between GStreamer pipelines and Zenoh networks, enabling
+//! distributed media streaming and data sharing across different applications
+//! and systems.
+//!
+//! ## Features
+//!
+//! * **Quality of Service (QoS) Control**: Configurable reliability and congestion control
+//! * **Low Latency Mode**: Express mode for time-critical applications
+//! * **Priority Management**: Message prioritization for bandwidth management
+//! * **Session Sharing**: Support for shared Zenoh sessions across elements
+//! * **Flexible Configuration**: Support for Zenoh config files and runtime parameters
 //! 
 //! ## Properties
 //!
 //! * `key-expr` - Zenoh key expression for publishing data (required)
+//!   - Example: "demo/video/stream" or "sensors/temperature/{device_id}"
 //! * `config` - Path to Zenoh configuration file (optional)
+//!   - Allows custom Zenoh network configuration (endpoints, discovery, etc.)
 //! * `priority` - Publisher priority (-100 to 100, default: 0)
-//! * `congestion-control` - Congestion control policy: "block" or "drop" (default: "block")
-//! * `reliability` - Reliability mode: "best-effort" or "reliable" (default: "best-effort")
-//! * `express` - Enable express mode for lower latency (bypasses some queues, default: false)
+//!   - Higher values get precedence during network congestion
+//! * `congestion-control` - Congestion control policy (default: "block")
+//!   - `"block"`: Wait for network congestion to clear (ensures delivery)
+//!   - `"drop"`: Drop messages during congestion (maintains real-time performance)
+//! * `reliability` - Reliability mode (default: "best-effort")
+//!   - `"best-effort"`: Fire-and-forget delivery (lower latency)
+//!   - `"reliable"`: Acknowledged delivery with retransmission (higher reliability)
+//! * `express` - Enable express mode for lower latency (default: false)
+//!   - Bypasses some internal queues for reduced end-to-end latency
+//!   - May increase CPU usage but improves responsiveness
 //!
 //! ## Example Pipelines
 //! 
+//! ### Basic Video Streaming
 //! ```bash
-//! # Basic usage
+//! # Simple video streaming
 //! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/stream
+//! ```
 //!
-//! # With reliability and express mode
+//! ### High-Quality Reliable Streaming
+//! ```bash
+//! # Reliable delivery with high priority and express mode for low latency
 //! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/reliable \
-//!   reliability=reliable congestion-control=block express=true priority=10
+//!   reliability=reliable congestion-control=block express=true priority=50
+//! ```
 //!
-//! # Best-effort with drop congestion control
-//! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/besteffort \
-//!   reliability=best-effort congestion-control=drop
+//! ### Real-Time Streaming with Quality Trade-offs
+//! ```bash
+//! # Best-effort delivery optimized for real-time performance
+//! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/realtime \
+//!   reliability=best-effort congestion-control=drop express=true
+//! ```
+//!
+//! ### Audio Streaming with Custom Configuration
+//! ```bash
+//! # Audio with custom Zenoh configuration
+//! gst-launch-1.0 audiotestsrc ! audioconvert ! zenohsink \
+//!   key-expr=demo/audio/stream config=/path/to/zenoh.json5 priority=10
+//! ```
+//!
+//! ### Encoded Video with H.264
+//! ```bash
+//! # H.264 encoded video streaming
+//! gst-launch-1.0 videotestsrc ! x264enc ! rtph264pay ! zenohsink \
+//!   key-expr=demo/video/h264 reliability=reliable
 //! ```
 
 use gst::glib;

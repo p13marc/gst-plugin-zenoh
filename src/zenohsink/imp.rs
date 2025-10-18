@@ -24,13 +24,20 @@ struct Started {
     publisher: zenoh::pubsub::Publisher<'static>,
 }
 
-// Wrapper to handle both owned and shared sessions
+/// Wrapper to handle both owned and shared Zenoh sessions.
+/// 
+/// This allows the plugin to either create its own session or use
+/// a shared session provided externally, enabling session reuse
+/// across multiple GStreamer elements.
 enum SessionWrapper {
+    /// Element owns the session exclusively
     Owned(zenoh::Session),
+    /// Element shares a session with other components
     Shared(Arc<zenoh::Session>),
 }
 
 impl SessionWrapper {
+    /// Get a reference to the underlying Zenoh session
     fn as_session(&self) -> &zenoh::Session {
         match self {
             SessionWrapper::Owned(session) => session,
@@ -66,14 +73,25 @@ impl State {
     }
 }
 
+/// Configuration settings for the ZenohSink element.
+/// 
+/// These settings control how the element connects to and publishes
+/// data via the Zenoh network protocol.
 #[derive(Debug)]
 struct Settings {
+    /// Zenoh key expression for publishing data (required)
     key_expr: String,
+    /// Optional path to Zenoh configuration file
     config_file: Option<String>,
+    /// Publisher priority (-100 to 100, higher = more priority)
     priority: i32,
+    /// Congestion control policy: "block" or "drop"
     congestion_control: String,
+    /// Reliability mode: "best-effort" or "reliable"
     reliability: String,
+    /// Enable express mode for lower latency (bypasses some queues)
     express: bool,
+    /// Optional external Zenoh session to share with other elements
     external_session: Option<Arc<zenoh::Session>>,
 }
 
@@ -95,8 +113,22 @@ impl Default for Settings {
 // here since Zenoh already has them, but we expose string properties
 // to the GStreamer API for compatibility and future extension
 
+/// GStreamer ZenohSink element implementation.
+/// 
+/// This element receives buffers from upstream GStreamer elements
+/// and publishes them to a Zenoh network using the configured
+/// key expression and quality of service parameters.
+/// 
+/// The element supports:
+/// - Configurable reliability (best-effort/reliable)
+/// - Congestion control (block/drop)
+/// - Express mode for low latency
+/// - Priority-based message ordering
+/// - Session sharing capabilities
 pub struct ZenohSink {
+    /// Element configuration settings
     settings: Mutex<Settings>,
+    /// Current operational state
     state: Mutex<State>,
 }
 
@@ -357,8 +389,14 @@ impl BaseSinkImpl for ZenohSink {
         let owned = OwnedKeyExpr::try_from(key_expr.clone())
             .map_err(|e| ZenohError::KeyExprError(e.to_string()).to_error_message())?;
 
-        // Parse configuration options
+        // Parse and validate configuration options for Zenoh publisher
+        
+        // Priority: Higher values get precedence in message delivery
         let zenoh_priority = Priority::try_from(priority as u8).unwrap_or(Priority::default());
+        
+        // Congestion control: How to handle network congestion
+        // - Block: Wait until congestion clears (ensures delivery but may cause delays)
+        // - Drop: Drop messages during congestion (maintains throughput but may lose data)
         let zenoh_congestion_control = match congestion_control.as_str() {
             "block" => CongestionControl::Block,
             "drop" => CongestionControl::Drop,
@@ -367,6 +405,10 @@ impl BaseSinkImpl for ZenohSink {
                 CongestionControl::Block
             }
         };
+        
+        // Reliability: Message delivery guarantees
+        // - Reliable: Messages are acknowledged and retransmitted if lost
+        // - BestEffort: Messages sent once without delivery guarantees (lower latency)
         let zenoh_reliability = match reliability.as_str() {
             "reliable" => Reliability::Reliable,
             "best-effort" => Reliability::BestEffort,
@@ -376,13 +418,16 @@ impl BaseSinkImpl for ZenohSink {
             }
         };
 
-        // Create publisher with configuration options
+        // Create publisher with full configuration
+        // Start with the key expression and add QoS parameters
         let mut publisher_builder = session_wrapper.as_session()
             .declare_publisher(owned)
             .priority(zenoh_priority)
             .congestion_control(zenoh_congestion_control)
             .reliability(zenoh_reliability);
         
+        // Express mode: Bypass some internal queues for reduced latency
+        // Trade-off: Lower latency vs potentially higher CPU usage
         if express {
             publisher_builder = publisher_builder.express(true);
         }

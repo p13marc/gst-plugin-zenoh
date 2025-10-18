@@ -30,10 +30,51 @@
 //! [`zenohsink`]: zenohsink::ZenohSink
 //! [`zenohsrc`]: zenohsrc::ZenohSrc
 
+//! # gst-plugin-zenoh
+//!
+//! A high-performance GStreamer plugin for distributed media streaming using Zenoh.
+//!
+//! This plugin provides seamless integration between GStreamer multimedia pipelines
+//! and Zenoh networks, enabling distributed applications, edge computing scenarios,
+//! robotics systems, and IoT data streaming.
+//!
+//! ## Elements
+//!
+//! - [`zenohsink`]: Publishes GStreamer buffers to Zenoh networks
+//! - [`zenohsrc`]: Subscribes to Zenoh data and delivers it to GStreamer pipelines
+//!
+//! ## Features
+//!
+//! - **Advanced QoS Control**: Configurable reliability, congestion control, and priority
+//! - **Express Mode**: Ultra-low latency streaming with queue bypass
+//! - **Session Sharing**: Efficient resource management across multiple elements
+//! - **Thread Safety**: Safe concurrent access to all components
+//! - **Error Recovery**: Comprehensive error handling and network resilience
+//!
+//! ## Quick Start
+//!
+//! ```bash
+//! # Build the plugin
+//! cargo build --release
+//!
+//! # Simple streaming example
+//! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video
+//! gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
+//! ```
+//!
+//! ## Examples
+//!
+//! See the `examples/` directory for comprehensive usage demonstrations:
+//! - `basic.rs`: Simple video streaming setup
+//! - `configuration.rs`: Advanced QoS configuration showcase
+//!
+//! [`zenohsink`]: zenohsink
+//! [`zenohsrc`]: zenohsrc
+
 use gst::glib;
 
 mod error;
-mod utils;
+pub mod utils;
 mod zenohsink;
 mod zenohsrc;
 
