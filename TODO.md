@@ -20,7 +20,7 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 
 1. **Integration Testing and Examples**:
    - [x] Add unit tests for core functionality (14 tests passing)
-   - [ ] Implement integration tests with actual Zenoh network
+   - [x] Implement integration tests with actual Zenoh network (4 tests covering pipelines, config, properties)
    - [ ] Create examples demonstrating various usage patterns
 
 2. **Advanced Features**:
