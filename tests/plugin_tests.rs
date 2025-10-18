@@ -68,8 +68,8 @@ fn test_zenohsink_properties() {
     let config: Option<String> = sink.property("config");
     assert_eq!(config, None);
     
-    let priority: i32 = sink.property("priority");
-    assert_eq!(priority, 0);
+    let priority: u32 = sink.property("priority");
+    assert_eq!(priority, 5); // Default is Priority::Data
     
     let congestion_control: String = sink.property("congestion-control");
     assert_eq!(congestion_control, "block");
@@ -82,9 +82,9 @@ fn test_zenohsink_properties() {
     let new_key_expr: String = sink.property("key-expr");
     assert_eq!(new_key_expr, "test/key");
     
-    sink.set_property("priority", 5i32);
-    let new_priority: i32 = sink.property("priority");
-    assert_eq!(new_priority, 5);
+    sink.set_property("priority", 2u32); // InteractiveHigh
+    let new_priority: u32 = sink.property("priority");
+    assert_eq!(new_priority, 2);
     
     sink.set_property("congestion-control", "drop");
     let new_congestion: String = sink.property("congestion-control");
@@ -111,8 +111,8 @@ fn test_zenohsrc_properties() {
     let config: Option<String> = src.property("config");
     assert_eq!(config, None);
     
-    let priority: i32 = src.property("priority");
-    assert_eq!(priority, 0);
+    let priority: u32 = src.property("priority");
+    assert_eq!(priority, 5); // Default is Priority::Data
     
     let congestion_control: String = src.property("congestion-control");
     assert_eq!(congestion_control, "block");
@@ -125,9 +125,9 @@ fn test_zenohsrc_properties() {
     let new_key_expr: String = src.property("key-expr");
     assert_eq!(new_key_expr, "test/key");
     
-    src.set_property("priority", -10i32);
-    let new_priority: i32 = src.property("priority");
-    assert_eq!(new_priority, -10);
+    src.set_property("priority", 6u32); // DataLow
+    let new_priority: u32 = src.property("priority");
+    assert_eq!(new_priority, 6);
 }
 
 #[test]

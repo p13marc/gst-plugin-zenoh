@@ -133,19 +133,25 @@ fn test_priority_bounds() {
         .build()
         .expect("Failed to create zenohsink");
     
-    // Test setting priority within bounds
-    sink.set_property("priority", 100i32);
-    let priority: i32 = sink.property("priority");
-    assert_eq!(priority, 100);
+    // Test setting priority within bounds (1-7 for Zenoh)
+    sink.set_property("priority", 1u32); // RealTime
+    let priority: u32 = sink.property("priority");
+    assert_eq!(priority, 1);
     
-    sink.set_property("priority", -100i32);
-    let priority: i32 = sink.property("priority");
-    assert_eq!(priority, -100);
+    sink.set_property("priority", 7u32); // Background
+    let priority: u32 = sink.property("priority");
+    assert_eq!(priority, 7);
     
     // Test setting priority outside bounds - GStreamer should reject with panic
     let result = std::panic::catch_unwind(|| {
-        sink.set_property("priority", 200i32);
+        sink.set_property("priority", 0u32);
     });
-    // Should panic because 200 is outside the -100 to 100 range
+    // Should panic because 0 is outside the 1-7 range
+    assert!(result.is_err(), "Setting priority outside bounds should panic");
+    
+    let result = std::panic::catch_unwind(|| {
+        sink.set_property("priority", 8u32);
+    });
+    // Should panic because 8 is outside the 1-7 range
     assert!(result.is_err(), "Setting priority outside bounds should panic");
 }

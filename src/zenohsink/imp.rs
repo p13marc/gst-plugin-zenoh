@@ -83,8 +83,8 @@ struct Settings {
     key_expr: String,
     /// Optional path to Zenoh configuration file
     config_file: Option<String>,
-    /// Publisher priority (-100 to 100, higher = more priority)
-    priority: i32,
+    /// Publisher priority level (1-7: 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background)
+    priority: u8,
     /// Congestion control policy: "block" or "drop"
     congestion_control: String,
     /// Reliability mode: "best-effort" or "reliable"
@@ -100,7 +100,7 @@ impl Default for Settings {
         Self {
             key_expr: String::new(),
             config_file: None,
-            priority: 0,
+            priority: 5, // Default to Priority::Data
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
             express: false,
@@ -198,13 +198,13 @@ impl ObjectImpl for ZenohSink {
                     .nick("config file")
                     .blurb("Path to Zenoh configuration file")
                     .build(),
-                // Priority property
-                glib::ParamSpecInt::builder("priority")
+                // Priority property  
+                glib::ParamSpecUInt::builder("priority")
                     .nick("priority")
-                    .blurb("Priority for the Zenoh publisher (higher value = higher priority)")
-                    .default_value(0)
-                    .minimum(-100)
-                    .maximum(100)
+                    .blurb("Priority for the Zenoh publisher (1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background)")
+                    .default_value(5)
+                    .minimum(1)
+                    .maximum(7)
                     .build(),
                 // Congestion control property
                 glib::ParamSpecString::builder("congestion-control")
@@ -251,7 +251,14 @@ impl ObjectImpl for ZenohSink {
                     .expect("type checked upstream");
             }
             "priority" => {
-                settings.priority = value.get::<i32>().expect("type checked upstream");
+                let priority_val = value.get::<u32>().expect("type checked upstream") as u8;
+                // Validate priority range
+                if (1..=7).contains(&priority_val) {
+                    settings.priority = priority_val;
+                } else {
+                    gst::warning!(CAT, "Invalid priority value '{}', must be 1-7, using default", priority_val);
+                    settings.priority = 5; // Default to Priority::Data
+                }
             }
             "congestion-control" => {
                 let control = value.get::<String>().expect("type checked upstream");
@@ -292,7 +299,7 @@ impl ObjectImpl for ZenohSink {
         match pspec.name() {
             "key-expr" => settings.key_expr.to_value(),
             "config" => settings.config_file.to_value(),
-            "priority" => settings.priority.to_value(),
+            "priority" => (settings.priority as u32).to_value(),
             "congestion-control" => settings.congestion_control.to_value(),
             "reliability" => settings.reliability.to_value(),
             "express" => settings.express.to_value(),
@@ -391,8 +398,9 @@ impl BaseSinkImpl for ZenohSink {
 
         // Parse and validate configuration options for Zenoh publisher
         
-        // Priority: Higher values get precedence in message delivery
-        let zenoh_priority = Priority::try_from(priority as u8).unwrap_or(Priority::default());
+        // Priority: Zenoh priority levels (lower numeric value = higher priority)
+        // 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background
+        let zenoh_priority = Priority::try_from(priority).unwrap_or(Priority::default());
         
         // Congestion control: How to handle network congestion
         // - Block: Wait until congestion clears (ensures delivery but may cause delays)

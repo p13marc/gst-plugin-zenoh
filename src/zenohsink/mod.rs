@@ -19,8 +19,8 @@
 //!   - Example: "demo/video/stream" or "sensors/temperature/{device_id}"
 //! * `config` - Path to Zenoh configuration file (optional)
 //!   - Allows custom Zenoh network configuration (endpoints, discovery, etc.)
-//! * `priority` - Publisher priority (-100 to 100, default: 0)
-//!   - Higher values get precedence during network congestion
+//! * `priority` - Publisher priority level (1-7, default: 5)
+//!   - 1=RealTime (highest), 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background(lowest)
 //! * `congestion-control` - Congestion control policy (default: "block")
 //!   - `"block"`: Wait for network congestion to clear (ensures delivery)
 //!   - `"drop"`: Drop messages during congestion (maintains real-time performance)
@@ -43,7 +43,7 @@
 //! ```bash
 //! # Reliable delivery with high priority and express mode for low latency
 //! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/reliable \
-//!   reliability=reliable congestion-control=block express=true priority=50
+//!   reliability=reliable congestion-control=block express=true priority=2
 //! ```
 //!
 //! ### Real-Time Streaming with Quality Trade-offs
@@ -57,7 +57,7 @@
 //! ```bash
 //! # Audio with custom Zenoh configuration
 //! gst-launch-1.0 audiotestsrc ! audioconvert ! zenohsink \
-//!   key-expr=demo/audio/stream config=/path/to/zenoh.json5 priority=10
+//!   key-expr=demo/audio/stream config=/path/to/zenoh.json5 priority=4
 //! ```
 //!
 //! ### Encoded Video with H.264

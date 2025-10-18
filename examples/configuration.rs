@@ -53,14 +53,14 @@ fn basic_configuration_example() -> Result<(), Error> {
     // Display current properties including the new express property
     println!("Sink properties:");
     println!("  key-expr: {}", sink.property::<String>("key-expr"));
-    println!("  priority: {}", sink.property::<i32>("priority"));
+    println!("  priority: {} (Data - default)", sink.property::<u32>("priority"));
     println!("  congestion-control: {}", sink.property::<String>("congestion-control"));
     println!("  reliability: {}", sink.property::<String>("reliability"));
     println!("  express: {}", sink.property::<bool>("express"));
 
     println!("Source properties:");
     println!("  key-expr: {}", src.property::<String>("key-expr"));
-    println!("  priority: {}", src.property::<i32>("priority"));
+    println!("  priority: {} (Data - default)", src.property::<u32>("priority"));
     println!("  congestion-control: {}", src.property::<String>("congestion-control"));
     println!("  reliability: {}", src.property::<String>("reliability"));
 
@@ -144,36 +144,36 @@ fn reliability_example() -> Result<(), Error> {
 }
 
 fn priority_example() -> Result<(), Error> {
-    // Test different priority levels
-    let sink_high_priority = gst::ElementFactory::make("zenohsink")
-        .property("key-expr", "config/example/high-priority")
-        .property("priority", 5i32)
+    // Test different priority levels using Zenoh Priority enum values
+    let sink_realtime_priority = gst::ElementFactory::make("zenohsink")
+        .property("key-expr", "config/example/realtime-priority")
+        .property("priority", 1u32) // RealTime priority
         .build()?;
 
-    let sink_low_priority = gst::ElementFactory::make("zenohsink")
-        .property("key-expr", "config/example/low-priority")
-        .property("priority", -5i32)
+    let sink_background_priority = gst::ElementFactory::make("zenohsink")
+        .property("key-expr", "config/example/background-priority")
+        .property("priority", 7u32) // Background priority
         .build()?;
 
     let src_default_priority = gst::ElementFactory::make("zenohsrc")
         .property("key-expr", "config/example/default-priority")
-        .property("priority", 0i32)
+        .property("priority", 5u32) // Data priority (default)
         .build()?;
 
-    println!("Priority examples:");
-    println!("  High priority sink: {}", sink_high_priority.property::<i32>("priority"));
-    println!("  Low priority sink: {}", sink_low_priority.property::<i32>("priority"));
-    println!("  Default priority src: {}", src_default_priority.property::<i32>("priority"));
+    println!("Priority examples (1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background):");
+    println!("  RealTime priority sink: {}", sink_realtime_priority.property::<u32>("priority"));
+    println!("  Background priority sink: {}", sink_background_priority.property::<u32>("priority"));
+    println!("  Default priority src: {}", src_default_priority.property::<u32>("priority"));
 
     // Test state transitions
-    sink_high_priority.set_state(gst::State::Ready)?;
-    sink_low_priority.set_state(gst::State::Ready)?;
+    sink_realtime_priority.set_state(gst::State::Ready)?;
+    sink_background_priority.set_state(gst::State::Ready)?;
     src_default_priority.set_state(gst::State::Ready)?;
 
     thread::sleep(Duration::from_millis(100));
 
-    sink_high_priority.set_state(gst::State::Null)?;
-    sink_low_priority.set_state(gst::State::Null)?;
+    sink_realtime_priority.set_state(gst::State::Null)?;
+    sink_background_priority.set_state(gst::State::Null)?;
     src_default_priority.set_state(gst::State::Null)?;
 
     println!("Priority settings test completed successfully");
@@ -185,26 +185,26 @@ fn express_mode_example() -> Result<(), Error> {
     let sink_express = gst::ElementFactory::make("zenohsink")
         .property("key-expr", "config/example/express")
         .property("express", true)
-        .property("priority", 10i32)
+        .property("priority", 2u32) // InteractiveHigh priority
         .property("reliability", "reliable")
         .build()?;
 
     let sink_normal = gst::ElementFactory::make("zenohsink")
         .property("key-expr", "config/example/normal")
         .property("express", false)
-        .property("priority", 10i32)
+        .property("priority", 4u32) // DataHigh priority
         .property("reliability", "reliable")
         .build()?;
 
     println!("Express mode examples:");
     println!("  Express enabled sink:");
     println!("    express: {}", sink_express.property::<bool>("express"));
-    println!("    priority: {}", sink_express.property::<i32>("priority"));
+    println!("    priority: {} (InteractiveHigh)", sink_express.property::<u32>("priority"));
     println!("    reliability: {}", sink_express.property::<String>("reliability"));
     
     println!("  Normal mode sink:");
     println!("    express: {}", sink_normal.property::<bool>("express"));
-    println!("    priority: {}", sink_normal.property::<i32>("priority"));
+    println!("    priority: {} (DataHigh)", sink_normal.property::<u32>("priority"));
     println!("    reliability: {}", sink_normal.property::<String>("reliability"));
 
     // Test state transitions

@@ -83,8 +83,8 @@ struct Settings {
     key_expr: String,
     /// Optional path to Zenoh configuration file
     config_file: Option<String>,
-    /// Subscriber priority (-100 to 100, higher = more priority)
-    priority: i32,
+    /// Subscriber priority level (1-7: 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background)
+    priority: u8,
     /// Congestion control policy: "block" or "drop" (informational for subscriber)
     congestion_control: String,
     /// Reliability mode: "best-effort" or "reliable" (matches publisher settings)
@@ -98,7 +98,7 @@ impl Default for Settings {
         Self {
             key_expr: String::new(),
             config_file: None,
-            priority: 0,
+            priority: 5, // Default to Priority::Data
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
             external_session: None,
@@ -181,12 +181,12 @@ impl ObjectImpl for ZenohSrc {
                     .build(),
                     
                 // Priority property
-                glib::ParamSpecInt::builder("priority")
+                glib::ParamSpecUInt::builder("priority")
                     .nick("priority")
-                    .blurb("Priority for the Zenoh subscriber (higher value = higher priority)")
-                    .default_value(0)
-                    .minimum(-100)
-                    .maximum(100)
+                    .blurb("Priority for the Zenoh subscriber (1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background)")
+                    .default_value(5)
+                    .minimum(1)
+                    .maximum(7)
                     .build(),
                     
                 // Congestion control property
@@ -227,7 +227,14 @@ impl ObjectImpl for ZenohSrc {
                 settings.config_file = value.get::<Option<String>>().expect("type checked upstream");
             }
             "priority" => {
-                settings.priority = value.get::<i32>().expect("type checked upstream");
+                let priority_val = value.get::<u32>().expect("type checked upstream") as u8;
+                // Validate priority range
+                if (1..=7).contains(&priority_val) {
+                    settings.priority = priority_val;
+                } else {
+                    gst::warning!(CAT, "Invalid priority value '{}', must be 1-7, using default", priority_val);
+                    settings.priority = 5; // Default to Priority::Data
+                }
             }
             "congestion-control" => {
                 let control = value.get::<String>().expect("type checked upstream");
@@ -265,7 +272,7 @@ impl ObjectImpl for ZenohSrc {
         match pspec.name() {
             "key-expr" => settings.key_expr.to_value(),
             "config" => settings.config_file.to_value(),
-            "priority" => settings.priority.to_value(),
+            "priority" => (settings.priority as u32).to_value(),
             "congestion-control" => settings.congestion_control.to_value(),
             "reliability" => settings.reliability.to_value(),
             name => {

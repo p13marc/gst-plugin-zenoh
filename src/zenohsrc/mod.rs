@@ -37,8 +37,8 @@
 //!   - Supports Zenoh key expression wildcards like "*" and "**"
 //! * `config` - Path to Zenoh configuration file (optional)
 //!   - Allows custom Zenoh network configuration (endpoints, discovery, etc.)
-//! * `priority` - Subscriber priority (-100 to 100, default: 0)
-//!   - Higher values get precedence during message processing
+//! * `priority` - Subscriber priority level (1-7, default: 5)
+//!   - 1=RealTime (highest), 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background(lowest)
 //! * `congestion-control` - Congestion control policy (informational, default: "block")
 //!   - Mainly for configuration consistency with zenohsink
 //! * `reliability` - Expected reliability mode (informational, default: "best-effort")

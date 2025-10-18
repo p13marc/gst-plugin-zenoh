@@ -21,7 +21,7 @@ Together, these elements enable distributed media applications, edge computing s
 ### Advanced Quality of Service (QoS)
 - **Reliability Modes**: Choose between `best-effort` (low latency) and `reliable` (guaranteed delivery)
 - **Congestion Control**: Handle network congestion with `block` (ensure delivery) or `drop` (maintain real-time performance)
-- **Priority Management**: Message prioritization from -100 to 100 for intelligent bandwidth allocation
+- **Priority Management**: Message prioritization using Zenoh Priority levels (1-7) for intelligent bandwidth allocation
 
 ### Performance Optimization
 - **Express Mode**: Ultra-low latency mode that bypasses internal queues
@@ -84,12 +84,12 @@ gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 # Ultra-low latency streaming with express mode
 gst-launch-1.0 videotestsrc pattern=ball ! video/x-raw,width=1280,height=720,framerate=30/1 ! \
   x264enc tune=zerolatency speed-preset=ultrafast ! rtph264pay ! \
-  zenohsink key-expr=demo/video/hd reliability=best-effort congestion-control=drop express=true priority=50
+  zenohsink key-expr=demo/video/hd reliability=best-effort congestion-control=drop express=true priority=2
 
 # Reliable HD streaming with error recovery
 gst-launch-1.0 videotestsrc ! video/x-raw,width=1920,height=1080 ! \
   x264enc bitrate=5000 ! rtph264pay ! \
-  zenohsink key-expr=demo/video/reliable reliability=reliable congestion-control=block priority=10
+  zenohsink key-expr=demo/video/reliable reliability=reliable congestion-control=block priority=4
 ```
 
 ### Multi-Stream Applications
@@ -103,8 +103,8 @@ gst-launch-1.0 \
 
 # Multi-camera setup with priorities  
 gst-launch-1.0 \
-  v4l2src device=/dev/video0 ! zenohsink key-expr=demo/cam/main priority=20 \
-  v4l2src device=/dev/video1 ! zenohsink key-expr=demo/cam/backup priority=-10
+  v4l2src device=/dev/video0 ! zenohsink key-expr=demo/cam/main priority=2 \
+  v4l2src device=/dev/video1 ! zenohsink key-expr=demo/cam/backup priority=6
 ```
 
 ### IoT and Sensor Data
@@ -112,7 +112,7 @@ gst-launch-1.0 \
 # Sensor data with custom Zenoh configuration
 gst-launch-1.0 appsrc ! \
   zenohsink key-expr=sensors/temperature/device-001 config=/etc/zenoh/iot.json5 \
-  reliability=reliable priority=5
+  reliability=reliable priority=4
 
 # Wildcard subscription for multiple sensors
 gst-launch-1.0 zenohsrc key-expr="sensors/**" ! \
@@ -137,18 +137,18 @@ gst-launch-1.0 zenohsrc key-expr=edge/camera/raw ! \
 |----------|------|---------|-------------|
 | `key-expr` | String | *required* | Zenoh key expression for publishing (e.g., "demo/video/stream") |
 | `config` | String | `null` | Path to Zenoh configuration file for custom network settings |
-| `priority` | Integer | `0` | Publisher priority (-100 to 100). Higher values get precedence during congestion |
+|| `priority` | Integer | `5` | Publisher priority (1-7). Lower values = higher priority. 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background |
 | `congestion-control` | String | `"block"` | Congestion handling: `"block"` (wait) or `"drop"` (discard messages) |
 | `reliability` | String | `"best-effort"` | Delivery mode: `"best-effort"` (fast) or `"reliable"` (guaranteed) |
 | `express` | Boolean | `false` | Enable express mode for ultra-low latency (bypasses internal queues) |
 
 #### Usage Examples:
 ```bash
-# High priority reliable streaming
-zenohsink key-expr=critical/data reliability=reliable priority=50 express=true
+# High priority reliable streaming (RealTime priority)
+zenohsink key-expr=critical/data reliability=reliable priority=1 express=true
 
-# Real-time best-effort streaming  
-zenohsink key-expr=realtime/video reliability=best-effort congestion-control=drop express=true
+# Real-time best-effort streaming (InteractiveHigh priority)
+zenohsink key-expr=realtime/video reliability=best-effort congestion-control=drop express=true priority=2
 ```
 
 ### ZenohSrc Properties
@@ -157,7 +157,7 @@ zenohsink key-expr=realtime/video reliability=best-effort congestion-control=dro
 |----------|------|---------|-------------|
 | `key-expr` | String | *required* | Zenoh key expression for subscription (supports wildcards: `*`, `**`) |
 | `config` | String | `null` | Path to Zenoh configuration file |
-| `priority` | Integer | `0` | Subscriber priority (-100 to 100) for message processing order |
+|| `priority` | Integer | `5` | Subscriber priority (1-7). Lower values = higher priority. 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background |
 | `congestion-control` | String | `"block"` | Informational only - actual behavior determined by publisher |
 | `reliability` | String | `"best-effort"` | Expected reliability mode - actual mode matches publisher |
 
@@ -190,6 +190,22 @@ zenohsrc key-expr="**/temperature"
 - **`drop`**: Discard messages during congestion
   - Use for: Real-time streams where recent data is most valuable
   - Behavior: Maintains smooth streaming with occasional quality loss
+
+#### Priority Levels (Zenoh Priority Enum)
+
+The plugin uses Zenoh's built-in Priority enum with 7 levels (lower number = higher priority):
+
+| Value | Zenoh Priority | Use Case | Example Applications |
+|-------|---------------|----------|---------------------|
+| **1** | `RealTime` | Critical real-time systems | Safety systems, emergency alerts |
+| **2** | `InteractiveHigh` | High-priority interactive | Live video calls, remote control |
+| **3** | `InteractiveLow` | Standard interactive | User interfaces, notifications |
+| **4** | `DataHigh` | Important data transfer | Configuration updates, commands |
+| **5** | `Data` | Normal data (default) | Regular media streaming, telemetry |
+| **6** | `DataLow` | Low-priority data | Logs, historical data |
+| **7** | `Background` | Background tasks | File transfers, bulk operations |
+
+**Note**: These priorities only take effect when Zenoh QoS is enabled in the network configuration.
 
 #### Express Mode
 - **Enabled**: Bypass internal queues for minimum latency

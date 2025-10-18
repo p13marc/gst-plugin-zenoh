@@ -71,8 +71,8 @@ fn test_property_changes_during_started_state() {
         .expect("Failed to create zenohsink");
     
     // Set initial properties
-    sink.set_property("priority", 5i32);
-    let priority: i32 = sink.property("priority");
+    sink.set_property("priority", 5u32);
+    let priority: u32 = sink.property("priority");
     assert_eq!(priority, 5);
     
     // Start the element
@@ -83,10 +83,10 @@ fn test_property_changes_during_started_state() {
     let key_expr: String = sink.property("key-expr");
     assert_eq!(key_expr, "test/state/property"); // Should remain unchanged
     
-    // Priority changes should still work
-    sink.set_property("priority", 10i32);
-    let priority: i32 = sink.property("priority");
-    assert_eq!(priority, 10);
+    // Priority changes should also be blocked while started
+    sink.set_property("priority", 3u32); // InteractiveLow priority
+    let priority: u32 = sink.property("priority");
+    assert_eq!(priority, 5); // Should remain unchanged
     
     // Stop the element
     assert!(sink.set_state(gst::State::Null).is_ok());
@@ -95,6 +95,11 @@ fn test_property_changes_during_started_state() {
     sink.set_property("key-expr", "test/state/changed");
     let key_expr: String = sink.property("key-expr");
     assert_eq!(key_expr, "test/state/changed");
+    
+    // Now priority changes should also work again
+    sink.set_property("priority", 3u32); // InteractiveLow priority
+    let priority: u32 = sink.property("priority");
+    assert_eq!(priority, 3);
     
     println!("Property change validation test passed");
 }

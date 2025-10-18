@@ -1,5 +1,4 @@
 use gst::prelude::*;
-use gst_check::Harness;
 use serial_test::serial;
 
 #[test]
@@ -8,11 +7,12 @@ fn test_zenoh_sink_reliability_configuration() {
     gst::init().unwrap();
     gstzenoh::plugin_register_static().unwrap();
 
-    let mut sink_harness = Harness::new("zenohsink");
-    sink_harness.set_src_caps_str("application/octet-stream");
+    // Create element directly without harness to avoid state transitions
+    let sink = gst::ElementFactory::make("zenohsink")
+        .build()
+        .expect("Failed to create zenohsink element");
 
     // Test best-effort reliability (default)
-    let sink = sink_harness.element().unwrap();
     sink.set_property("key-expr", "test/sink/best-effort");
     sink.set_property("reliability", "best-effort");
     assert_eq!(sink.property::<String>("reliability"), "best-effort");
@@ -32,10 +32,10 @@ fn test_zenoh_sink_congestion_control_configuration() {
     gst::init().unwrap();
     gstzenoh::plugin_register_static().unwrap();
 
-    let mut sink_harness = Harness::new("zenohsink");
-    sink_harness.set_src_caps_str("application/octet-stream");
+    let sink = gst::ElementFactory::make("zenohsink")
+        .build()
+        .expect("Failed to create zenohsink element");
 
-    let sink = sink_harness.element().unwrap();
     sink.set_property("key-expr", "test/sink/congestion");
 
     // Test block congestion control (default)
@@ -57,10 +57,10 @@ fn test_zenoh_sink_express_mode() {
     gst::init().unwrap();
     gstzenoh::plugin_register_static().unwrap();
 
-    let mut sink_harness = Harness::new("zenohsink");
-    sink_harness.set_src_caps_str("application/octet-stream");
+    let sink = gst::ElementFactory::make("zenohsink")
+        .build()
+        .expect("Failed to create zenohsink element");
 
-    let sink = sink_harness.element().unwrap();
     sink.set_property("key-expr", "test/sink/express");
 
     // Test express mode disabled (default)
@@ -77,29 +77,30 @@ fn test_zenoh_sink_priority_configuration() {
     gst::init().unwrap();
     gstzenoh::plugin_register_static().unwrap();
 
-    let mut sink_harness = Harness::new("zenohsink");
-    sink_harness.set_src_caps_str("application/octet-stream");
+    let sink = gst::ElementFactory::make("zenohsink")
+        .build()
+        .expect("Failed to create zenohsink element");
 
-    let sink = sink_harness.element().unwrap();
     sink.set_property("key-expr", "test/sink/priority");
 
-    // Test default priority
-    assert_eq!(sink.property::<i32>("priority"), 0);
+    // Test default priority (Data = 5)
+    assert_eq!(sink.property::<u32>("priority"), 5);
 
-    // Test high priority
-    sink.set_property("priority", 50);
-    assert_eq!(sink.property::<i32>("priority"), 50);
+    // Test high priority (RealTime = 1)
+    sink.set_property("priority", 1u32);
+    assert_eq!(sink.property::<u32>("priority"), 1);
 
-    // Test low priority
-    sink.set_property("priority", -50);
-    assert_eq!(sink.property::<i32>("priority"), -50);
+    // Test low priority (Background = 7)
+    sink.set_property("priority", 7u32);
+    assert_eq!(sink.property::<u32>("priority"), 7);
 
-    // Test boundary values
-    sink.set_property("priority", 100);
-    assert_eq!(sink.property::<i32>("priority"), 100);
+    // Test InteractiveHigh priority
+    sink.set_property("priority", 2u32);
+    assert_eq!(sink.property::<u32>("priority"), 2);
 
-    sink.set_property("priority", -100);
-    assert_eq!(sink.property::<i32>("priority"), -100);
+    // Test DataLow priority
+    sink.set_property("priority", 6u32);
+    assert_eq!(sink.property::<u32>("priority"), 6);
 }
 
 #[test]
@@ -108,9 +109,10 @@ fn test_zenoh_src_reliability_configuration() {
     gst::init().unwrap();
     gstzenoh::plugin_register_static().unwrap();
 
-    let src_harness = Harness::new("zenohsrc");
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc element");
 
-    let src = src_harness.element().unwrap();
     src.set_property("key-expr", "test/src/best-effort");
 
     // Test best-effort reliability (default)
@@ -134,14 +136,14 @@ fn test_shared_session_functionality() {
     gst::init().unwrap();
     gstzenoh::plugin_register_static().unwrap();
 
-    let mut sink_harness = Harness::new("zenohsink");
-    sink_harness.set_src_caps_str("application/octet-stream");
-
     // Note: Currently we don't have a direct way to pass the Arc<Session> via GStreamer properties
     // This would require a custom property type or a session registry mechanism
     // For now, this test demonstrates the concept and can be expanded when the full API is implemented
 
-    let sink = sink_harness.element().unwrap();
+    let sink = gst::ElementFactory::make("zenohsink")
+        .build()
+        .expect("Failed to create zenohsink element");
+
     sink.set_property("key-expr", "test/sink/shared");
     sink.set_property("reliability", "reliable");
     sink.set_property("express", true);
@@ -157,13 +159,13 @@ fn test_end_to_end_configuration() {
     gst::init().unwrap();
     gstzenoh::plugin_register_static().unwrap();
 
-    let mut sink_harness = Harness::new("zenohsink");
-    sink_harness.set_src_caps_str("application/octet-stream");
+    let sink = gst::ElementFactory::make("zenohsink")
+        .build()
+        .expect("Failed to create zenohsink element");
 
-    let src_harness = Harness::new("zenohsrc");
-
-    let sink = sink_harness.element().unwrap();
-    let src = src_harness.element().unwrap();
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc element");
 
     // Configure both elements with matching reliability
     let key_expr = "test/e2e/reliable";
@@ -171,7 +173,7 @@ fn test_end_to_end_configuration() {
     sink.set_property("reliability", "reliable");
     sink.set_property("congestion-control", "block");
     sink.set_property("express", true);
-    sink.set_property("priority", 10);
+    sink.set_property("priority", 2u32); // InteractiveHigh priority
 
     src.set_property("key-expr", key_expr);
     src.set_property("reliability", "reliable");
@@ -180,6 +182,6 @@ fn test_end_to_end_configuration() {
     assert_eq!(sink.property::<String>("reliability"), "reliable");
     assert_eq!(sink.property::<String>("congestion-control"), "block");
     assert_eq!(sink.property::<bool>("express"), true);
-    assert_eq!(sink.property::<i32>("priority"), 10);
+    assert_eq!(sink.property::<u32>("priority"), 2);
     assert_eq!(src.property::<String>("reliability"), "reliable");
 }
