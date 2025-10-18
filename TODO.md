@@ -14,13 +14,14 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 - ✅ **Added comprehensive documentation**: Documented all elements and their properties
 - ✅ **Refactored assertions**: Replaced unreachable! with proper error handling
 - ✅ **Enhanced network resilience**: Added better error handling for network issues
+- ✅ **Added comprehensive unit tests**: 14 tests covering core functionality, properties, and error handling
 
 ## Next Steps
 
-1. **Testing and Examples**:
-   - Add unit tests for core functionality
-   - Implement integration tests with actual Zenoh network
-   - Create examples demonstrating various usage patterns
+1. **Integration Testing and Examples**:
+   - [x] Add unit tests for core functionality (14 tests passing)
+   - [ ] Implement integration tests with actual Zenoh network
+   - [ ] Create examples demonstrating various usage patterns
 
 2. **Advanced Features**:
    - Add reconnection logic for network failures
@@ -101,9 +102,9 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 
 ### Testing
 
-- [ ] Add unit tests for core functionality
+- [x] Add unit tests for core functionality (14 tests with cargo nextest)
+- [x] Add tests for error conditions and recovery
 - [ ] Implement integration tests with actual Zenoh network
-- [ ] Add tests for error conditions and recovery
 - [ ] Test performance under various network conditions
 
 ## Future Enhancements

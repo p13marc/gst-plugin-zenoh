@@ -12,7 +12,7 @@
 //!
 //! ## Example Pipeline
 //! 
-//! ```
+//! ```bash
 //! gst-launch-1.0 zenohsrc key-expr=demo/video/stream ! videoconvert ! autovideosink
 //! ```
 

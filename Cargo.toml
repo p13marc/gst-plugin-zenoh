@@ -25,6 +25,9 @@ anyhow = "1"
 [dev-dependencies]
 anyhow = "1"
 futures = "0.3"
+gst = { package = "gstreamer", version = "0.24.2" }
+gst-check = { package = "gstreamer-check", version = "0.24.2" }
+serial_test = "3.0"
 
 [build-dependencies]
 gst-plugin-version-helper = "0.8.2"
