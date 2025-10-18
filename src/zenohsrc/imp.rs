@@ -131,9 +131,9 @@ impl ElementImpl for ZenohSrc {
     fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
         static ELEMENT_METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
             gst::subclass::ElementMetadata::new(
-                "Zenoh Source",
-                "Source/Network/Zenoh",
-                "Receive data over the network via Zenoh",
+                "Zenoh Network Source",
+                "Source/Network/Protocol",
+                "Subscribes to Zenoh networks and delivers data as GStreamer buffers with wildcard key expression support",
                 "Marc Pardo <p13marc@gmail.com>",
             )
         });
@@ -170,20 +170,20 @@ impl ObjectImpl for ZenohSrc {
             vec![
                 // Key expression property
                 glib::ParamSpecString::builder("key-expr")
-                    .nick("key expression")
-                    .blurb("Key expression to where to receive data from")
+                    .nick("Zenoh Key Expression")
+                    .blurb("Zenoh key expression for data subscription. Supports wildcards: '*' (single level) and '**' (multi-level). Example: 'demo/video/*', 'sensors/**'")
                     .build(),
                     
                 // Config file property
                 glib::ParamSpecString::builder("config")
-                    .nick("config file")
-                    .blurb("Path to Zenoh configuration file")
+                    .nick("Zenoh Configuration")
+                    .blurb("Path to Zenoh configuration file for custom network settings (JSON5 format)")
                     .build(),
                     
                 // Priority property
                 glib::ParamSpecUInt::builder("priority")
-                    .nick("priority")
-                    .blurb("Priority for the Zenoh subscriber (1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background)")
+                    .nick("Subscriber Priority")
+                    .blurb("Message priority level: 1=RealTime(highest), 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background(lowest)")
                     .default_value(5)
                     .minimum(1)
                     .maximum(7)
@@ -191,15 +191,15 @@ impl ObjectImpl for ZenohSrc {
                     
                 // Congestion control property
                 glib::ParamSpecString::builder("congestion-control")
-                    .nick("congestion control")
-                    .blurb("Congestion control policy (block or drop)")
+                    .nick("Congestion Control")
+                    .blurb("Congestion control preference (informational): 'block' or 'drop'. Actual behavior depends on publisher settings.")
                     .default_value(Some("block"))
                     .build(),
                     
                 // Reliability property
                 glib::ParamSpecString::builder("reliability")
-                    .nick("reliability")
-                    .blurb("Reliability mode (best-effort or reliable)")
+                    .nick("Reliability Mode")
+                    .blurb("Expected reliability mode (informational): 'best-effort' or 'reliable'. Actual reliability is determined by publisher.")
                     .default_value(Some("best-effort"))
                     .build(),
             ]

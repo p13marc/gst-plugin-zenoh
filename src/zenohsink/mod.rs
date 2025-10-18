@@ -84,7 +84,7 @@ pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     gst::Element::register(
         Some(plugin),
         "zenohsink",
-        gst::Rank::MARGINAL,
+        gst::Rank::NONE + 100, // Higher than MARGINAL to be discoverable
         ZenohSink::static_type(),
     )
 }

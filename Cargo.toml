@@ -3,7 +3,7 @@ name = "gst-plugin-zenoh"
 version = "0.1.0"
 authors = ["Marc Pardo <p13marc@gmail.com>"]
 license = "MPL-2.0"
-description = "GStreamer Plugin for Zenoh"
+description = "High-performance GStreamer plugin for distributed media streaming using Zenoh protocol"
 repository = "https://github.com/p13marc/gst-plugin-zenoh.git"
 edition = "2021"
 

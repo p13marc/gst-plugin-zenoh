@@ -147,9 +147,9 @@ impl ElementImpl for ZenohSink {
     fn metadata() -> Option<&'static gst::subclass::ElementMetadata> {
         static ELEMENT_METADATA: LazyLock<gst::subclass::ElementMetadata> = LazyLock::new(|| {
             gst::subclass::ElementMetadata::new(
-                "Zenoh Sink",
-                "Source/Network/Zenoh",
-                "Send data over the network via Zenoh",
+                "Zenoh Network Sink",
+                "Sink/Network/Protocol",
+                "Publishes GStreamer buffers to Zenoh networks with configurable QoS (reliability, priority, express mode)",
                 "Marc Pardo <p13marc@gmail.com>",
             )
         });
@@ -190,38 +190,38 @@ impl ObjectImpl for ZenohSink {
             vec![
                 // Key expression property
                 glib::ParamSpecString::builder("key-expr")
-                    .nick("key expression")
-                    .blurb("Key expression to where to send data")
+                    .nick("Zenoh Key Expression")
+                    .blurb("Zenoh key expression for publishing data (e.g., 'demo/video/stream', 'sensors/{device_id}/**')")
                     .build(),
                 // Config file property
                 glib::ParamSpecString::builder("config")
-                    .nick("config file")
-                    .blurb("Path to Zenoh configuration file")
+                    .nick("Zenoh Configuration")
+                    .blurb("Path to Zenoh configuration file for custom network settings (JSON5 format)")
                     .build(),
                 // Priority property  
                 glib::ParamSpecUInt::builder("priority")
-                    .nick("priority")
-                    .blurb("Priority for the Zenoh publisher (1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background)")
+                    .nick("Publisher Priority")
+                    .blurb("Message priority level: 1=RealTime(highest), 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background(lowest)")
                     .default_value(5)
                     .minimum(1)
                     .maximum(7)
                     .build(),
                 // Congestion control property
                 glib::ParamSpecString::builder("congestion-control")
-                    .nick("congestion control")
-                    .blurb("Congestion control policy (block or drop)")
+                    .nick("Congestion Control")
+                    .blurb("Network congestion handling: 'block' (wait for delivery, ensures reliability) or 'drop' (drop messages, maintains real-time performance)")
                     .default_value(Some("block"))
                     .build(),
                 // Reliability property
                 glib::ParamSpecString::builder("reliability")
-                    .nick("reliability")
-                    .blurb("Reliability mode (best-effort or reliable)")
+                    .nick("Reliability Mode")
+                    .blurb("Message delivery guarantee: 'best-effort' (lower latency, may lose messages) or 'reliable' (acknowledged delivery with retransmission)")
                     .default_value(Some("best-effort"))
                     .build(),
                 // Express mode property
                 glib::ParamSpecBoolean::builder("express")
-                    .nick("express mode")
-                    .blurb("Enable express mode for the publisher (bypasses some queues for lower latency)")
+                    .nick("Express Mode")
+                    .blurb("Enable ultra-low latency mode by bypassing internal queues (increases CPU usage but reduces end-to-end latency)")
                     .default_value(false)
                     .build(),
             ]
