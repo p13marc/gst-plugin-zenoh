@@ -98,7 +98,7 @@ This document outlines the improvements and fixes needed for the gst-plugin-zeno
 - [x] Add comprehensive inline documentation
 - [x] Document expected behavior during error conditions
 - [x] Create examples demonstrating various usage patterns (4 comprehensive examples + README)
-- [ ] Add architecture documentation explaining component interactions
+- [x] Add architecture documentation explaining component interactions (comprehensive ARCHITECTURE.md)
 
 ### Testing
 
