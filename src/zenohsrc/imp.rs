@@ -28,7 +28,27 @@ struct Started {
 enum State {
     #[default]
     Stopped,
+    Starting, // Intermediate state during startup
     Started(Started),
+    Stopping, // Intermediate state during shutdown
+}
+
+impl State {
+    fn is_started(&self) -> bool {
+        matches!(self, State::Started(_))
+    }
+    
+    fn is_stopped(&self) -> bool {
+        matches!(self, State::Stopped)
+    }
+    
+    fn can_start(&self) -> bool {
+        matches!(self, State::Stopped)
+    }
+    
+    fn can_stop(&self) -> bool {
+        matches!(self, State::Started(_))
+    }
 }
 
 #[derive(Debug)]
@@ -142,6 +162,14 @@ impl ObjectImpl for ZenohSrc {
     }
 
     fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+        // Check if we're in a state where property changes are allowed
+        let state = self.state.lock().unwrap();
+        if state.is_started() && matches!(pspec.name(), "key-expr" | "config") {
+            gst::warning!(CAT, "Cannot change property '{}' while element is started", pspec.name());
+            return;
+        }
+        drop(state);
+        
         let mut settings = self.settings.lock().unwrap();
 
         match pspec.name() {
@@ -220,10 +248,28 @@ impl BaseSrcImpl for ZenohSrc {
     fn start(&self) -> Result<(), gst::ErrorMessage> {
         let mut state = self.state.lock().unwrap();
 
-        if let State::Started { .. } = *state {
-            gst::warning!(CAT, "ZenohSrc is already started, ignoring start request");
-            return Ok(()); // Already started, nothing to do
+        // Check if we can start from current state
+        if !state.can_start() {
+            let current_state = match *state {
+                State::Stopped => "Stopped",
+                State::Starting => "Starting", 
+                State::Started(_) => "Started",
+                State::Stopping => "Stopping",
+            };
+            gst::warning!(CAT, "Cannot start ZenohSrc from state: {}, ignoring start request", current_state);
+            if state.is_started() {
+                return Ok(()); // Already started is not an error
+            } else {
+                return Err(gst::error_msg!(
+                    gst::ResourceError::Settings,
+                    ["Cannot start from current state: {}", current_state]
+                ));
+            }
         }
+        
+        gst::debug!(CAT, "ZenohSrc transitioning from Stopped to Starting");
+        *state = State::Starting;
+        drop(state); // Release state lock before potentially long operations
 
         // Get settings
         let settings = self.settings.lock().unwrap();
@@ -262,17 +308,60 @@ impl BaseSrcImpl for ZenohSrc {
             .wait()
             .map_err(|e| ZenohError::InitError(e).to_error_message())?;
 
+        // Reacquire state lock to complete transition
+        let mut state = self.state.lock().unwrap();
+        
+        // Verify we're still in Starting state (not stopped during initialization)
+        if !matches!(*state, State::Starting) {
+            gst::warning!(CAT, "State changed during startup, aborting start operation");
+            return Err(gst::error_msg!(
+                gst::ResourceError::Settings,
+                ["State changed during startup"]
+            ));
+        }
+        
         *state = State::Started(Started {
             session,
             subscriber,
         });
-
-        // Commented code removed - using wait() instead of async
+        
+        gst::debug!(CAT, "ZenohSrc successfully transitioned to Started state");
 
         Ok(())
     }
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
-        *self.state.lock().unwrap() = State::Stopped;
+        let mut state = self.state.lock().unwrap();
+        
+        // Check if we can stop from current state
+        if !state.can_stop() {
+            let current_state = match *state {
+                State::Stopped => "Stopped",
+                State::Starting => "Starting",
+                State::Started(_) => "Started", 
+                State::Stopping => "Stopping",
+            };
+            gst::debug!(CAT, "ZenohSrc stop called from state: {}", current_state);
+            if state.is_stopped() {
+                return Ok(()); // Already stopped is not an error
+            }
+            // For Starting state, we should wait or error - for now just warn and continue
+            gst::warning!(CAT, "Stopping ZenohSrc from non-started state: {}", current_state);
+        }
+        
+        if let State::Started(ref _started) = *state {
+            gst::debug!(CAT, "ZenohSrc transitioning from Started to Stopping");
+            // Set to Stopping state temporarily
+            let _started_data = match std::mem::replace(&mut *state, State::Stopping) {
+                State::Started(started) => started,
+                _ => unreachable!(),
+            };
+            
+            // Resources will be cleaned up when _started_data is dropped
+            gst::debug!(CAT, "ZenohSrc resources cleaned up");
+        }
+        
+        *state = State::Stopped;
+        gst::debug!(CAT, "ZenohSrc successfully transitioned to Stopped state");
 
         Ok(())
     }

@@ -92,7 +92,16 @@ cargo run --example video_stream
 - Better error messages
 - SMPTE color bars test pattern
 
-**Requirements:** At least one H.264 encoder (`x264enc` or `openh264enc`)
+**Requirements:** H.264 encoder and decoder (`x264enc`/`avdec_h264` from gst-plugins-ugly recommended)
+
+**Note:** If you see "Missing decoder: H.264" errors, install additional codecs:
+```bash
+# Fedora/RHEL (enable RPM Fusion for full codec support)
+sudo dnf install gstreamer1-plugins-ugly gstreamer1-libav
+
+# Ubuntu/Debian  
+sudo apt-get install gstreamer1.0-plugins-ugly gstreamer1.0-libav
+```
 
 ### 4. Configuration Examples (`configuration.rs`)
 **Zenoh property and configuration demonstration**

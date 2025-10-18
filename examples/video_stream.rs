@@ -10,12 +10,12 @@ fn main() -> Result<(), Error> {
     println!("Starting video streaming example...");
     println!("This example streams test video through Zenoh");
     println!("Make sure you have GStreamer video plugins installed!");
+    println!("Required: gstreamer1-plugins-ugly (x264enc/avdec_h264) or gstreamer1-plugins-bad (openh264enc)");
 
     // Create sender pipeline: videotestsrc -> video encoding -> zenohsink
     let sender = gst::Pipeline::new();
     
     let videosrc = gst::ElementFactory::make("videotestsrc")
-        .property("pattern", 0i32) // SMPTE color bars
         .build()?;
     
     let videoconvert = gst::ElementFactory::make("videoconvert").build()?;
@@ -23,7 +23,6 @@ fn main() -> Result<(), Error> {
     // Use x264enc for better compatibility, fall back to other encoders
     let encoder = if let Ok(x264) = gst::ElementFactory::make("x264enc")
         .property("bitrate", 1000u32) // 1 Mbps
-        .property("speed-preset", 6u32) // ultrafast
         .build()
     {
         println!("Using x264enc for encoding");
