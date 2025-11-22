@@ -374,6 +374,7 @@ impl ObjectSubclass for ZenohSrc {
     const NAME: &'static str = "GstZenohSrc";
     type Type = super::ZenohSrc;
     type ParentType = gst_base::PushSrc;
+    type Interfaces = (gst::URIHandler,);
 }
 
 impl BaseSrcImpl for ZenohSrc {

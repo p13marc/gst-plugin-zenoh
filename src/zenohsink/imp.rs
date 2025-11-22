@@ -408,6 +408,7 @@ impl ObjectSubclass for ZenohSink {
     const NAME: &'static str = "GstZenohSink";
     type Type = super::ZenohSink;
     type ParentType = gst_base::BaseSink;
+    type Interfaces = (gst::URIHandler,);
 }
 
 impl BaseSinkImpl for ZenohSink {
