@@ -11,6 +11,7 @@ use gst_base::{
 use zenoh::Wait;
 
 use crate::error::{ErrorHandling, FlowErrorHandling, ZenohError};
+use crate::metadata::MetadataParser;
 
 // Define debug category for logging
 #[allow(dead_code)]
@@ -675,6 +676,36 @@ impl PushSrcImpl for ZenohSrc {
                 }
             }
         };
+
+        // Check if the sample has attachment metadata (caps, custom metadata, etc.)
+        if let Some(attachment) = sample.attachment() {
+            match MetadataParser::parse(attachment) {
+                Ok(metadata) => {
+                    // If caps are present in metadata, set them on the source pad
+                    if let Some(caps) = metadata.caps() {
+                        gst::debug!(CAT, imp = self, "Received caps from metadata: {}", caps);
+
+                        // Set caps on the source pad
+                        if let Err(e) = self.obj().set_caps(caps) {
+                            gst::warning!(CAT, imp = self, "Failed to set caps: {}", e);
+                        }
+                    }
+
+                    // Log any user metadata
+                    if !metadata.user_metadata().is_empty() {
+                        gst::trace!(
+                            CAT,
+                            imp = self,
+                            "Received user metadata: {:?}",
+                            metadata.user_metadata()
+                        );
+                    }
+                }
+                Err(e) => {
+                    gst::warning!(CAT, imp = self, "Failed to parse metadata: {}", e);
+                }
+            }
+        }
 
         let payload = sample.payload();
         let slice = payload.to_bytes();

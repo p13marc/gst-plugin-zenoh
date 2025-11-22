@@ -74,6 +74,7 @@
 use gst::glib;
 
 mod error;
+pub mod metadata;
 pub mod utils;
 mod zenohsink;
 mod zenohsrc;

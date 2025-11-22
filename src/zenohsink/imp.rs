@@ -1,13 +1,16 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use gst::subclass::prelude::URIHandlerImpl;
 use gst::{glib, prelude::*, subclass::prelude::*};
+use gst_base::prelude::BaseSinkExtManual;
 use gst_base::subclass::prelude::*;
 use zenoh::key_expr::OwnedKeyExpr;
 use zenoh::qos::{CongestionControl, Priority, Reliability};
 use zenoh::Wait;
 
 use crate::error::{ErrorHandling, FlowErrorHandling, ZenohError};
+use crate::metadata::MetadataBuilder;
 
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new(
@@ -35,6 +38,12 @@ struct Started {
     publisher: zenoh::pubsub::Publisher<'static>,
     /// Statistics tracking (shared for thread-safe updates)
     stats: Arc<Mutex<Statistics>>,
+    /// Track if we've sent caps metadata yet (for first buffer)
+    caps_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// Last time caps were sent (for periodic transmission)
+    last_caps_time: Arc<Mutex<Option<std::time::Instant>>>,
+    /// Last caps that were sent (for change detection)
+    last_caps: Arc<Mutex<Option<gst::Caps>>>,
 }
 
 /// Wrapper to handle both owned and shared Zenoh sessions.
@@ -104,6 +113,10 @@ struct Settings {
     reliability: String,
     /// Enable express mode for lower latency (bypasses some queues)
     express: bool,
+    /// Send GStreamer caps as metadata with buffers (default: true)
+    send_caps: bool,
+    /// Interval in seconds to send caps periodically (0 = only on first buffer and changes, default: 1)
+    caps_interval: u32,
     /// Optional external Zenoh session to share with other elements
     external_session: Option<Arc<zenoh::Session>>,
 }
@@ -117,6 +130,8 @@ impl Default for Settings {
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
             express: false,
+            send_caps: true,  // Default to sending caps for ease of use
+            caps_interval: 1, // Send caps every 1 second by default
             external_session: None,
         }
     }
@@ -237,6 +252,20 @@ impl ObjectImpl for ZenohSink {
                     .blurb("Enable ultra-low latency mode by bypassing internal queues (increases CPU usage but reduces end-to-end latency)")
                     .default_value(false)
                     .build(),
+                // Send caps property
+                glib::ParamSpecBoolean::builder("send-caps")
+                    .nick("Send Capabilities")
+                    .blurb("Attach GStreamer caps as metadata to buffers for automatic format negotiation")
+                    .default_value(true)
+                    .build(),
+                // Caps interval property
+                glib::ParamSpecUInt::builder("caps-interval")
+                    .nick("Caps Transmission Interval")
+                    .blurb("Interval in seconds to send caps periodically (0 = only first buffer and format changes, reduces bandwidth)")
+                    .default_value(1)
+                    .minimum(0)
+                    .maximum(3600)
+                    .build(),
                 // Statistics properties (read-only)
                 glib::ParamSpecUInt64::builder("bytes-sent")
                     .nick("Bytes Sent")
@@ -339,6 +368,12 @@ impl ObjectImpl for ZenohSink {
             "express" => {
                 settings.express = value.get::<bool>().expect("type checked upstream");
             }
+            "send-caps" => {
+                settings.send_caps = value.get::<bool>().expect("type checked upstream");
+            }
+            "caps-interval" => {
+                settings.caps_interval = value.get::<u32>().expect("type checked upstream");
+            }
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
             }
@@ -349,7 +384,7 @@ impl ObjectImpl for ZenohSink {
         match pspec.name() {
             // Configuration properties - read from settings
             "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
-            | "express" => {
+            | "express" | "send-caps" | "caps-interval" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
@@ -358,6 +393,8 @@ impl ObjectImpl for ZenohSink {
                     "congestion-control" => settings.congestion_control.to_value(),
                     "reliability" => settings.reliability.to_value(),
                     "express" => settings.express.to_value(),
+                    "send-caps" => settings.send_caps.to_value(),
+                    "caps-interval" => settings.caps_interval.to_value(),
                     _ => unreachable!(),
                 }
             }
@@ -584,6 +621,9 @@ impl BaseSinkImpl for ZenohSink {
                 )),
                 ..Default::default()
             })),
+            caps_sent: Arc::new(AtomicBool::new(false)),
+            last_caps_time: Arc::new(Mutex::new(None)),
+            last_caps: Arc::new(Mutex::new(None)),
         });
         gst::debug!(CAT, "ZenohSink successfully transitioned to Started state");
 
@@ -607,9 +647,79 @@ impl BaseSinkImpl for ZenohSink {
             gst::FlowError::Error
         })?;
 
-        // Send directly using synchronous API with proper error handling
+        // Smart caps transmission: send caps when needed, not on every buffer
+        let (send_caps, caps_interval) = {
+            let settings = self.settings.lock().unwrap();
+            (settings.send_caps, settings.caps_interval)
+        };
+
+        let attachment = if send_caps {
+            if let Some(caps) = self.obj().sink_pad().current_caps() {
+                let mut should_send = false;
+
+                // Check if this is the first buffer (always send)
+                if !started.caps_sent.load(Ordering::Acquire) {
+                    gst::debug!(CAT, imp = self, "Sending caps on first buffer: {}", caps);
+                    should_send = true;
+                    started.caps_sent.store(true, Ordering::Release);
+                    *started.last_caps.lock().unwrap() = Some(caps.clone());
+                    *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
+                } else {
+                    // Check if caps have changed (always send on change)
+                    let last_caps = started.last_caps.lock().unwrap();
+                    if last_caps.as_ref() != Some(&caps) {
+                        gst::debug!(
+                            CAT,
+                            imp = self,
+                            "Caps changed, sending updated caps: {}",
+                            caps
+                        );
+                        should_send = true;
+                        drop(last_caps);
+                        *started.last_caps.lock().unwrap() = Some(caps.clone());
+                        *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
+                    } else if caps_interval > 0 {
+                        // Check if it's time for periodic transmission
+                        let last_time = started.last_caps_time.lock().unwrap();
+                        if let Some(last) = *last_time {
+                            if last.elapsed().as_secs() >= caps_interval as u64 {
+                                gst::trace!(
+                                    CAT,
+                                    imp = self,
+                                    "Periodic caps transmission (interval: {}s)",
+                                    caps_interval
+                                );
+                                should_send = true;
+                                drop(last_time);
+                                *started.last_caps_time.lock().unwrap() =
+                                    Some(std::time::Instant::now());
+                            }
+                        }
+                    }
+                }
+
+                if should_send {
+                    MetadataBuilder::new().caps(&caps).build()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Send with caps attachment on every buffer
         // Note: Zenoh's wait() already handles timeouts internally
-        match started.publisher.put(b.as_slice()).wait() {
+        let put_builder = started.publisher.put(b.as_slice());
+        let result = if let Some(attachment) = attachment {
+            put_builder.attachment(attachment).wait()
+        } else {
+            put_builder.wait()
+        };
+
+        match result {
             Ok(_) => {
                 // Update statistics on success
                 let mut stats = started.stats.lock().unwrap();
@@ -667,6 +777,60 @@ impl BaseSinkImpl for ZenohSink {
         let mut total_messages = 0u64;
         let mut errors_count = 0u64;
 
+        // Use same smart caps logic as render() - reuse the decision
+        let (send_caps, caps_interval) = {
+            let settings = self.settings.lock().unwrap();
+            (settings.send_caps, settings.caps_interval)
+        };
+
+        let caps_attachment = if send_caps {
+            if let Some(caps) = self.obj().sink_pad().current_caps() {
+                let mut should_send = false;
+
+                if !started.caps_sent.load(Ordering::Acquire) {
+                    gst::debug!(
+                        CAT,
+                        imp = self,
+                        "Sending caps on first buffer list: {}",
+                        caps
+                    );
+                    should_send = true;
+                    started.caps_sent.store(true, Ordering::Release);
+                    *started.last_caps.lock().unwrap() = Some(caps.clone());
+                    *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
+                } else {
+                    let last_caps = started.last_caps.lock().unwrap();
+                    if last_caps.as_ref() != Some(&caps) {
+                        gst::debug!(CAT, imp = self, "Caps changed in buffer list: {}", caps);
+                        should_send = true;
+                        drop(last_caps);
+                        *started.last_caps.lock().unwrap() = Some(caps.clone());
+                        *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
+                    } else if caps_interval > 0 {
+                        let last_time = started.last_caps_time.lock().unwrap();
+                        if let Some(last) = *last_time {
+                            if last.elapsed().as_secs() >= caps_interval as u64 {
+                                should_send = true;
+                                drop(last_time);
+                                *started.last_caps_time.lock().unwrap() =
+                                    Some(std::time::Instant::now());
+                            }
+                        }
+                    }
+                }
+
+                if should_send {
+                    MetadataBuilder::new().caps(&caps).build()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Process each buffer in the list
         for buffer in list.iter() {
             // Get buffer data
@@ -680,8 +844,15 @@ impl BaseSinkImpl for ZenohSink {
                 gst::FlowError::Error
             })?;
 
-            // Send buffer
-            match started.publisher.put(b.as_slice()).wait() {
+            // Send buffer with caps attachment (all buffers get same attachment)
+            let put_builder = started.publisher.put(b.as_slice());
+            let result = if let Some(ref attachment) = caps_attachment {
+                put_builder.attachment(attachment.clone()).wait()
+            } else {
+                put_builder.wait()
+            };
+
+            match result {
                 Ok(_) => {
                     total_bytes += b.len() as u64;
                     total_messages += 1;

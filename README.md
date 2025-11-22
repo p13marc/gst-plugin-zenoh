@@ -36,6 +36,12 @@ Together, these elements enable distributed media applications, edge computing s
 - **Zenoh Config Files**: Support for comprehensive Zenoh network configuration
 - **Key Expression Patterns**: Flexible topic naming with wildcard support
 
+### Automatic Format Negotiation
+- **Caps Transmission**: GStreamer capabilities automatically transmitted with first buffer
+- **Metadata Support**: Custom key-value metadata can be attached to streams
+- **Zero Configuration**: Receiver automatically configures based on sender's format
+- **Format Changes**: Supports dynamic format changes during streaming
+
 ### Production Monitoring
 - **Real-time Statistics**: Track bytes sent/received, message counts, errors, and dropped packets
 - **Read-only Properties**: Monitor performance without affecting operation
@@ -310,10 +316,12 @@ if let Some(uri_handler) = sink.dynamic_cast_ref::<gst::URIHandler>() {
 |----------|------|---------|-------------|
 | `key-expr` | String | *required* | Zenoh key expression for publishing (e.g., "demo/video/stream") |
 | `config` | String | `null` | Path to Zenoh configuration file for custom network settings |
-|| `priority` | Integer | `5` | Publisher priority (1-7). Lower values = higher priority. 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background |
+| `priority` | Integer | `5` | Publisher priority (1-7). Lower values = higher priority. 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background |
 | `congestion-control` | String | `"block"` | Congestion handling: `"block"` (wait) or `"drop"` (discard messages) |
 | `reliability` | String | `"best-effort"` | Delivery mode: `"best-effort"` (fast) or `"reliable"` (guaranteed) |
 | `express` | Boolean | `false` | Enable express mode for ultra-low latency (bypasses internal queues) |
+| `send-caps` | Boolean | `true` | Enable caps transmission as metadata (automatic format negotiation) |
+| `caps-interval` | Integer | `1` | Interval in seconds to send caps periodically (0 = only first buffer and format changes) |
 
 #### Usage Examples:
 ```bash
@@ -322,6 +330,12 @@ zenohsink key-expr=critical/data reliability=reliable priority=1 express=true
 
 # Real-time best-effort streaming (InteractiveHigh priority)
 zenohsink key-expr=realtime/video reliability=best-effort congestion-control=drop express=true priority=2
+
+# Minimal bandwidth: send caps only on first buffer and format changes
+zenohsink key-expr=optimized/stream caps-interval=0
+
+# Disable caps entirely for absolute minimal overhead
+zenohsink key-expr=nocaps/stream send-caps=false
 ```
 
 ### ZenohSrc Properties
