@@ -26,17 +26,27 @@ Together, these elements enable distributed media applications, edge computing s
 ### Performance Optimization
 - **Express Mode**: Ultra-low latency mode that bypasses internal queues
 - **Session Sharing**: Efficient resource usage through shared Zenoh sessions
-- **Zero-Copy Operations**: Optimized data paths for minimal overhead
+- **Batch Rendering**: Efficient buffer list processing for high-throughput scenarios
+- **Responsive State Changes**: Sub-second response to pipeline state changes with proper unlock/flush support
+- **Optimized Data Paths**: Minimal overhead with efficient memory handling
 
 ### Flexible Configuration
+- **URI Handler Support**: Configure elements using standard GStreamer URI syntax (e.g., `zenoh:demo/video?priority=2&reliability=reliable`)
 - **Runtime Properties**: Configure QoS parameters dynamically
 - **Zenoh Config Files**: Support for comprehensive Zenoh network configuration
 - **Key Expression Patterns**: Flexible topic naming with wildcard support
 
+### Production Monitoring
+- **Real-time Statistics**: Track bytes sent/received, message counts, errors, and dropped packets
+- **Read-only Properties**: Monitor performance without affecting operation
+- **Thread-safe Updates**: Atomic statistics updates for accurate metrics
+
 ### Enterprise Ready
-- **Error Handling**: Comprehensive error recovery and reporting
+- **Rich Error Messages**: Contextual error messages with troubleshooting guidance
+- **Comprehensive Error Handling**: 10 specific error types with helpful diagnostics
 - **Thread Safety**: Safe concurrent access to all plugin components
 - **Property Locking**: Runtime protection against invalid configuration changes
+- **Extensive Testing**: 71 comprehensive tests ensuring reliability
 
 ## Quick Start
 
@@ -127,6 +137,169 @@ gst-launch-1.0 zenohsrc key-expr=edge/camera/raw ! \
   tensor_converter ! tensor_transform mode=arithmetic option=typecast:float32,add:-127.5,div:127.5 ! \
   tensor_filter framework=tensorflow-lite model=detection.tflite ! \
   zenohsink key-expr=edge/ai/detections reliability=reliable express=true
+```
+
+## 📊 Statistics Monitoring
+
+Both `zenohsink` and `zenohsrc` provide real-time statistics for monitoring performance and debugging issues. All statistics properties are read-only and thread-safe.
+
+### ZenohSink Statistics
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `bytes-sent` | UInt64 | Total bytes published to Zenoh network |
+| `messages-sent` | UInt64 | Total number of buffers published |
+| `errors` | UInt64 | Number of publish errors encountered |
+| `dropped` | UInt64 | Number of buffers dropped due to congestion (when `congestion-control=drop`) |
+
+### ZenohSrc Statistics
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `bytes-received` | UInt64 | Total bytes received from Zenoh network |
+| `messages-received` | UInt64 | Total number of buffers received |
+| `errors` | UInt64 | Number of receive errors encountered |
+| `dropped` | UInt64 | Number of samples dropped (reserved for future use) |
+
+### Monitoring Examples
+
+```bash
+# Monitor statistics in real-time using gst-launch watch mode
+GST_DEBUG=zenohsink:5 gst-launch-1.0 videotestsrc num-buffers=100 ! \
+  zenohsink name=sink key-expr=demo/stats ! \
+  fakesink
+
+# Query statistics programmatically in a script
+gst-launch-1.0 videotestsrc num-buffers=1000 ! \
+  zenohsink name=mysink key-expr=demo/video ! fakesink & \
+PIPELINE_PID=$!
+sleep 5
+# Use gst-inspect or property queries to read statistics
+kill $PIPELINE_PID
+```
+
+### Programmatic Statistics Access (Rust)
+
+```rust
+use gst::prelude::*;
+
+// Create pipeline with named sink
+let pipeline = gst::parse_launch(
+    "videotestsrc ! zenohsink name=sink key-expr=demo/monitor"
+)?;
+
+// Get the zenohsink element
+let sink = pipeline
+    .by_name("sink")
+    .expect("Could not find sink element");
+
+// Start pipeline
+pipeline.set_state(gst::State::Playing)?;
+
+// Monitor statistics periodically
+loop {
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    
+    let bytes_sent: u64 = sink.property("bytes-sent");
+    let messages_sent: u64 = sink.property("messages-sent");
+    let errors: u64 = sink.property("errors");
+    let dropped: u64 = sink.property("dropped");
+    
+    println!("Stats: {} bytes, {} msgs, {} errors, {} dropped",
+             bytes_sent, messages_sent, errors, dropped);
+    
+    if messages_sent >= 1000 {
+        break;
+    }
+}
+
+pipeline.set_state(gst::State::Null)?;
+```
+
+## 🔗 URI Handler Support
+
+Both elements implement the GStreamer `URIHandler` interface, allowing configuration via URI syntax. This provides a convenient alternative to setting individual properties.
+
+### URI Syntax
+
+```
+zenoh:<key-expression>[?<parameter>=<value>&...]
+```
+
+### Supported URI Parameters
+
+| Parameter | Values | Example |
+|-----------|--------|---------|
+| `priority` | 1-7 | `priority=2` |
+| `reliability` | `best-effort`, `reliable` | `reliability=reliable` |
+| `congestion-control` | `block`, `drop` | `congestion-control=drop` |
+| `express` | `true`, `false` | `express=true` |
+| `config` | File path | `config=/etc/zenoh/config.json5` |
+
+### URI Examples
+
+```bash
+# Simple key expression only
+gst-launch-1.0 videotestsrc ! zenohsink uri="zenoh:demo/video"
+
+# With QoS parameters
+gst-launch-1.0 videotestsrc ! \
+  zenohsink uri="zenoh:demo/video?priority=2&reliability=reliable&express=true"
+
+# Full configuration with custom Zenoh config
+gst-launch-1.0 videotestsrc ! \
+  zenohsink uri="zenoh:sensors/camera?priority=1&reliability=reliable&congestion-control=block&config=/etc/zenoh/edge.json5"
+
+# Receiving with URI
+gst-launch-1.0 \
+  zenohsrc uri="zenoh:demo/video?priority=2" ! \
+  videoconvert ! autovideosink
+
+# Wildcard subscription
+gst-launch-1.0 \
+  zenohsrc uri="zenoh:sensors/**" ! \
+  appsink
+```
+
+### URI vs Properties
+
+Both methods are equivalent and can be mixed:
+
+```bash
+# Using individual properties
+gst-launch-1.0 videotestsrc ! \
+  zenohsink key-expr=demo/video priority=2 reliability=reliable
+
+# Using URI (equivalent)
+gst-launch-1.0 videotestsrc ! \
+  zenohsink uri="zenoh:demo/video?priority=2&reliability=reliable"
+
+# Mixed approach (URI sets base, properties override)
+gst-launch-1.0 videotestsrc ! \
+  zenohsink uri="zenoh:demo/video?priority=2" reliability=reliable express=true
+```
+
+### Programmatic URI Usage (Rust)
+
+```rust
+use gst::prelude::*;
+
+// Create element and set URI
+let sink = gst::ElementFactory::make("zenohsink").build()?;
+
+// Set URI using URIHandler interface
+if let Some(uri_handler) = sink.dynamic_cast_ref::<gst::URIHandler>() {
+    uri_handler.set_uri("zenoh:demo/video?priority=2&reliability=reliable")?;
+}
+
+// Or use the uri property directly
+sink.set_property("uri", "zenoh:demo/video?priority=2&reliability=reliable");
+
+// Read back current URI
+if let Some(uri_handler) = sink.dynamic_cast_ref::<gst::URIHandler>() {
+    let current_uri = uri_handler.uri();
+    println!("Current URI: {:?}", current_uri);
+}
 ```
 
 ## ⚙️ Element Properties
