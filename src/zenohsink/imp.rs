@@ -489,8 +489,13 @@ impl BaseSinkImpl for ZenohSink {
                   key_expr, priority, congestion_control, reliability, express);
 
         // Use owned key_expr for static lifetime, with proper error handling
-        let owned = OwnedKeyExpr::try_from(key_expr.clone())
-            .map_err(|e| ZenohError::KeyExprError(e.to_string()).to_error_message())?;
+        let owned = OwnedKeyExpr::try_from(key_expr.clone()).map_err(|e| {
+            ZenohError::KeyExprError {
+                key_expr: key_expr.clone(),
+                reason: e.to_string(),
+            }
+            .to_error_message()
+        })?;
 
         // Parse and validate configuration options for Zenoh publisher
 
@@ -541,9 +546,13 @@ impl BaseSinkImpl for ZenohSink {
             publisher_builder = publisher_builder.express(true);
         }
 
-        let publisher = publisher_builder
-            .wait()
-            .map_err(|e| ZenohError::PublishError(e).to_error_message())?;
+        let publisher = publisher_builder.wait().map_err(|e| {
+            ZenohError::PublishError {
+                key_expr: key_expr.clone(),
+                source: e,
+            }
+            .to_error_message()
+        })?;
 
         gst::debug!(CAT, "Publisher created with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
             key_expr, priority, congestion_control, reliability, express);
@@ -612,9 +621,16 @@ impl BaseSinkImpl for ZenohSink {
                 // Update error statistics
                 started.stats.lock().unwrap().errors += 1;
 
+                // Get key expression for better error reporting
+                let key_expr = self.settings.lock().unwrap().key_expr.clone();
+
                 // Check if this is a network-related error before consuming e
                 let error_msg = format!("{}", e);
-                let err = ZenohError::PublishError(e);
+                let err = ZenohError::PublishError {
+                    key_expr,
+                    source: e,
+                };
+
                 if error_msg.contains("timeout")
                     || error_msg.contains("connection")
                     || error_msg.contains("network")
@@ -672,8 +688,14 @@ impl BaseSinkImpl for ZenohSink {
                 }
                 Err(e) => {
                     errors_count += 1;
+
+                    // Get key expression for error reporting
+                    let key_expr = self.settings.lock().unwrap().key_expr.clone();
                     let error_msg = format!("{}", e);
-                    let err = ZenohError::PublishError(e);
+                    let err = ZenohError::PublishError {
+                        key_expr,
+                        source: e,
+                    };
 
                     if error_msg.contains("timeout")
                         || error_msg.contains("connection")
