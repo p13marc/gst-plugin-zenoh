@@ -20,6 +20,7 @@ gst = { package = "gstreamer", version = "0.24.2" }
 gst-base = { package = "gstreamer-base", version = "0.24.2" }
 futures = "0.3.30"
 anyhow = "1"
+urlencoding = "2.1"
 
 
 [dev-dependencies]

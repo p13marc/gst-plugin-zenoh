@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
+use gst::subclass::prelude::URIHandlerImpl;
 use gst::{glib, prelude::*, subclass::prelude::*};
 use gst_base::{
     prelude::BaseSrcExt,
@@ -591,6 +592,34 @@ impl BaseSrcImpl for ZenohSrc {
             _ => self.parent_event(event),
         }
     }
+
+    fn query(&self, query: &mut gst::QueryRef) -> bool {
+        use gst::QueryViewMut;
+
+        match query.view_mut() {
+            QueryViewMut::Latency(ref mut q) => {
+                // Report as a live source with minimal latency
+                // - live: true (we're a network source)
+                // - min_latency: ZERO (Zenoh has very low latency)
+                // - max_latency: NONE (unbounded, depends on network conditions)
+                gst::debug!(CAT, imp = self, "Responding to latency query");
+                q.set(true, gst::ClockTime::ZERO, gst::ClockTime::NONE);
+                true
+            }
+            QueryViewMut::Scheduling(ref mut q) => {
+                // Report that we support push mode scheduling
+                // - SEQUENTIAL flag: we deliver buffers sequentially
+                // - minsize: 1 (we can deliver any size)
+                // - maxsize: -1 (unlimited)
+                // - align: 0 (no alignment requirements)
+                gst::debug!(CAT, imp = self, "Responding to scheduling query");
+                q.set(gst::SchedulingFlags::SEQUENTIAL, 1, -1, 0);
+                q.add_scheduling_modes([gst::PadMode::Push]);
+                true
+            }
+            _ => BaseSrcImplExt::parent_query(self, query),
+        }
+    }
 }
 
 impl PushSrcImpl for ZenohSrc {
@@ -658,18 +687,17 @@ impl PushSrcImpl for ZenohSrc {
             gst::FlowError::Error
         })?;
 
-        buffer
-            .get_mut()
-            .ok_or_else(|| {
+        {
+            let buffer_mut = buffer.get_mut().ok_or_else(|| {
                 gst::element_imp_error!(
                     self,
                     gst::ResourceError::Failed,
                     ["Failed to get mutable buffer reference"]
                 );
                 gst::FlowError::Error
-            })?
-            .copy_from_slice(0, &slice)
-            .map_err(|_| {
+            })?;
+
+            buffer_mut.copy_from_slice(0, &slice).map_err(|_| {
                 gst::element_imp_error!(
                     self,
                     gst::ResourceError::Failed,
@@ -678,6 +706,42 @@ impl PushSrcImpl for ZenohSrc {
                 gst::FlowError::Error
             })?;
 
+            // Extract Zenoh timestamp if available and apply it to the buffer
+            // This helps with synchronization and proper buffer timestamping
+            if let Some(timestamp) = sample.timestamp() {
+                // Zenoh timestamps are in NTP64 format (64-bit timestamp)
+                // Convert to GStreamer ClockTime (nanoseconds since epoch)
+                let ntp_time = timestamp.get_time();
+
+                // NTP64 timestamp is split into:
+                // - upper 32 bits: seconds since NTP epoch (Jan 1, 1900)
+                // - lower 32 bits: fractional seconds
+                // We need to convert this to nanoseconds since Unix epoch (Jan 1, 1970)
+
+                // NTP epoch is 2208988800 seconds before Unix epoch
+                const NTP_UNIX_OFFSET: u64 = 2208988800;
+
+                let ntp_secs = ntp_time.as_secs() as u64;
+                let ntp_nanos = ntp_time.subsec_nanos() as u64;
+
+                // Convert to Unix epoch
+                if ntp_secs >= NTP_UNIX_OFFSET {
+                    let unix_secs = ntp_secs - NTP_UNIX_OFFSET;
+                    let total_nanos = unix_secs * 1_000_000_000 + ntp_nanos;
+
+                    let pts = gst::ClockTime::from_nseconds(total_nanos);
+                    buffer_mut.set_pts(pts);
+
+                    gst::trace!(
+                        CAT,
+                        imp = self,
+                        "Applied Zenoh timestamp to buffer: PTS = {}",
+                        pts
+                    );
+                }
+            }
+        }
+
         // Update statistics on success
         let mut stats = started.stats.lock().unwrap();
         stats.bytes_received += slice.len() as u64;
@@ -685,5 +749,151 @@ impl PushSrcImpl for ZenohSrc {
         drop(stats);
 
         Ok(CreateSuccess::NewBuffer(buffer))
+    }
+}
+
+impl URIHandlerImpl for ZenohSrc {
+    const URI_TYPE: gst::URIType = gst::URIType::Src;
+
+    fn protocols() -> &'static [&'static str] {
+        &["zenoh"]
+    }
+
+    fn uri(&self) -> Option<String> {
+        let settings = self.settings.lock().unwrap();
+        if settings.key_expr.is_empty() {
+            return None;
+        }
+
+        // Build URI in format: zenoh:key-expr?param1=value1&param2=value2
+        let mut uri = format!("zenoh:{}", settings.key_expr);
+        let mut params = Vec::new();
+
+        if let Some(ref config) = settings.config_file {
+            params.push(format!("config={}", urlencoding::encode(config)));
+        }
+        if settings.priority != 5 {
+            params.push(format!("priority={}", settings.priority));
+        }
+        if settings.congestion_control != "block" {
+            params.push(format!(
+                "congestion-control={}",
+                settings.congestion_control
+            ));
+        }
+        if settings.reliability != "best-effort" {
+            params.push(format!("reliability={}", settings.reliability));
+        }
+
+        if !params.is_empty() {
+            uri.push('?');
+            uri.push_str(&params.join("&"));
+        }
+
+        Some(uri)
+    }
+
+    fn set_uri(&self, uri: &str) -> Result<(), glib::Error> {
+        // Parse URI format: zenoh:key-expr?param1=value1&param2=value2
+        if !uri.starts_with("zenoh:") {
+            return Err(glib::Error::new(
+                gst::URIError::BadUri,
+                &format!("Invalid URI scheme, expected 'zenoh:', got: {}", uri),
+            ));
+        }
+
+        let uri_content = &uri[6..]; // Skip "zenoh:"
+
+        // Split into key expression and query parameters
+        let (key_expr, query) = if let Some(pos) = uri_content.find('?') {
+            (&uri_content[..pos], Some(&uri_content[pos + 1..]))
+        } else {
+            (uri_content, None)
+        };
+
+        if key_expr.is_empty() {
+            return Err(glib::Error::new(
+                gst::URIError::BadUri,
+                "Key expression cannot be empty",
+            ));
+        }
+
+        // Decode the key expression
+        let key_expr = urlencoding::decode(key_expr)
+            .map_err(|e| {
+                glib::Error::new(
+                    gst::URIError::BadUri,
+                    &format!("Failed to decode key expression: {}", e),
+                )
+            })?
+            .into_owned();
+
+        let mut settings = self.settings.lock().unwrap();
+
+        // Check if we can modify settings (not started)
+        let state = self.state.lock().unwrap();
+        if state.is_started() {
+            drop(state);
+            drop(settings);
+            return Err(glib::Error::new(
+                gst::URIError::BadState,
+                "Cannot change URI while element is started",
+            ));
+        }
+        drop(state);
+
+        settings.key_expr = key_expr;
+
+        // Parse query parameters
+        if let Some(query) = query {
+            for param in query.split('&') {
+                if let Some(pos) = param.find('=') {
+                    let key = &param[..pos];
+                    let value = urlencoding::decode(&param[pos + 1..])
+                        .map_err(|e| {
+                            glib::Error::new(
+                                gst::URIError::BadUri,
+                                &format!("Failed to decode parameter value: {}", e),
+                            )
+                        })?
+                        .into_owned();
+
+                    match key {
+                        "config" => settings.config_file = Some(value),
+                        "priority" => {
+                            settings.priority = value.parse().map_err(|_| {
+                                glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!("Invalid priority value: {}", value),
+                                )
+                            })?;
+                        }
+                        "congestion-control" => {
+                            if value != "block" && value != "drop" {
+                                return Err(glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!("Invalid congestion-control value: {}", value),
+                                ));
+                            }
+                            settings.congestion_control = value;
+                        }
+                        "reliability" => {
+                            if value != "best-effort" && value != "reliable" {
+                                return Err(glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!("Invalid reliability value: {}", value),
+                                ));
+                            }
+                            settings.reliability = value;
+                        }
+                        _ => {
+                            gst::warning!(CAT, imp = self, "Unknown URI parameter: {}", key);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }

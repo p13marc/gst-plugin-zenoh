@@ -1,5 +1,6 @@
 use std::sync::{Arc, LazyLock, Mutex};
 
+use gst::subclass::prelude::URIHandlerImpl;
 use gst::{glib, prelude::*, subclass::prelude::*};
 use gst_base::subclass::prelude::*;
 use zenoh::key_expr::OwnedKeyExpr;
@@ -694,5 +695,162 @@ impl BaseSinkImpl for ZenohSink {
                 self.parent_event(event)
             }
         }
+    }
+}
+
+impl URIHandlerImpl for ZenohSink {
+    const URI_TYPE: gst::URIType = gst::URIType::Sink;
+
+    fn protocols() -> &'static [&'static str] {
+        &["zenoh"]
+    }
+
+    fn uri(&self) -> Option<String> {
+        let settings = self.settings.lock().unwrap();
+        if settings.key_expr.is_empty() {
+            return None;
+        }
+
+        // Build URI in format: zenoh:key-expr?param1=value1&param2=value2
+        let mut uri = format!("zenoh:{}", settings.key_expr);
+        let mut params = Vec::new();
+
+        if let Some(ref config) = settings.config_file {
+            params.push(format!("config={}", urlencoding::encode(config)));
+        }
+        if settings.priority != 5 {
+            params.push(format!("priority={}", settings.priority));
+        }
+        if settings.congestion_control != "block" {
+            params.push(format!(
+                "congestion-control={}",
+                settings.congestion_control
+            ));
+        }
+        if settings.reliability != "best-effort" {
+            params.push(format!("reliability={}", settings.reliability));
+        }
+        if settings.express {
+            params.push("express=true".to_string());
+        }
+
+        if !params.is_empty() {
+            uri.push('?');
+            uri.push_str(&params.join("&"));
+        }
+
+        Some(uri)
+    }
+
+    fn set_uri(&self, uri: &str) -> Result<(), glib::Error> {
+        // Parse URI format: zenoh:key-expr?param1=value1&param2=value2
+        if !uri.starts_with("zenoh:") {
+            return Err(glib::Error::new(
+                gst::URIError::BadUri,
+                &format!("Invalid URI scheme, expected 'zenoh:', got: {}", uri),
+            ));
+        }
+
+        let uri_content = &uri[6..]; // Skip "zenoh:"
+
+        // Split into key expression and query parameters
+        let (key_expr, query) = if let Some(pos) = uri_content.find('?') {
+            (&uri_content[..pos], Some(&uri_content[pos + 1..]))
+        } else {
+            (uri_content, None)
+        };
+
+        if key_expr.is_empty() {
+            return Err(glib::Error::new(
+                gst::URIError::BadUri,
+                "Key expression cannot be empty",
+            ));
+        }
+
+        // Decode the key expression
+        let key_expr = urlencoding::decode(key_expr)
+            .map_err(|e| {
+                glib::Error::new(
+                    gst::URIError::BadUri,
+                    &format!("Failed to decode key expression: {}", e),
+                )
+            })?
+            .into_owned();
+
+        let mut settings = self.settings.lock().unwrap();
+
+        // Check if we can modify settings (not started)
+        let state = self.state.lock().unwrap();
+        if state.is_started() {
+            drop(state);
+            drop(settings);
+            return Err(glib::Error::new(
+                gst::URIError::BadState,
+                "Cannot change URI while element is started",
+            ));
+        }
+        drop(state);
+
+        settings.key_expr = key_expr;
+
+        // Parse query parameters
+        if let Some(query) = query {
+            for param in query.split('&') {
+                if let Some(pos) = param.find('=') {
+                    let key = &param[..pos];
+                    let value = urlencoding::decode(&param[pos + 1..])
+                        .map_err(|e| {
+                            glib::Error::new(
+                                gst::URIError::BadUri,
+                                &format!("Failed to decode parameter value: {}", e),
+                            )
+                        })?
+                        .into_owned();
+
+                    match key {
+                        "config" => settings.config_file = Some(value),
+                        "priority" => {
+                            settings.priority = value.parse().map_err(|_| {
+                                glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!("Invalid priority value: {}", value),
+                                )
+                            })?;
+                        }
+                        "congestion-control" => {
+                            if value != "block" && value != "drop" {
+                                return Err(glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!("Invalid congestion-control value: {}", value),
+                                ));
+                            }
+                            settings.congestion_control = value;
+                        }
+                        "reliability" => {
+                            if value != "best-effort" && value != "reliable" {
+                                return Err(glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!("Invalid reliability value: {}", value),
+                                ));
+                            }
+                            settings.reliability = value;
+                        }
+                        "express" => {
+                            settings.express = value.parse().map_err(|_| {
+                                glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!("Invalid express value: {}", value),
+                                )
+                            })?;
+                        }
+                        _ => {
+                            gst::warning!(CAT, imp = self, "Unknown URI parameter: {}", key);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }

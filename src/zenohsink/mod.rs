@@ -12,7 +12,7 @@
 //! * **Priority Management**: Message prioritization for bandwidth management
 //! * **Session Sharing**: Support for shared Zenoh sessions across elements
 //! * **Flexible Configuration**: Support for Zenoh config files and runtime parameters
-//! 
+//!
 //! ## Properties
 //!
 //! * `key-expr` - Zenoh key expression for publishing data (required)
@@ -32,7 +32,7 @@
 //!   - May increase CPU usage but improves responsiveness
 //!
 //! ## Example Pipelines
-//! 
+//!
 //! ### Basic Video Streaming
 //! ```bash
 //! # Simple video streaming
@@ -74,10 +74,10 @@ pub mod imp;
 
 glib::wrapper! {
     /// A GStreamer sink element that publishes data via Zenoh.
-    /// 
+    ///
     /// This element receives buffers from upstream elements and publishes
     /// them to a Zenoh network using the configured key expression.
-    pub struct ZenohSink(ObjectSubclass<imp::ZenohSink>) @extends gst_base::BaseSink, gst::Element, gst::Object;
+    pub struct ZenohSink(ObjectSubclass<imp::ZenohSink>) @extends gst_base::BaseSink, gst::Element, gst::Object, @implements gst::URIHandler;
 }
 
 pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {

@@ -1,7 +1,7 @@
 //! # ZenohSrc Element
 //!
 //! The ZenohSrc element receives data from the Zenoh network protocol and outputs GStreamer buffers.
-//! 
+//!
 //! ## Properties
 //!
 //! * `key-expr` - Zenoh key expression for subscribing to data (required)
@@ -11,7 +11,7 @@
 //! * `reliability` - Reliability mode: "best-effort" or "reliable" (default: "best-effort")
 //!
 //! ## Example Pipeline
-//! 
+//!
 //! ```bash
 //! gst-launch-1.0 zenohsrc key-expr=demo/video/stream ! videoconvert ! autovideosink
 //! ```
@@ -29,7 +29,7 @@
 //! * **Flexible Configuration**: Support for Zenoh config files and runtime parameters
 //! * **Real-time Streaming**: Optimized for low-latency data delivery
 //! * **Multiple Data Formats**: Works with any data type (video, audio, binary, etc.)
-//! 
+//!
 //! ## Properties
 //!
 //! * `key-expr` - Zenoh key expression for subscribing to data (required)
@@ -46,7 +46,7 @@
 //!   - Used for documentation and pipeline validation
 //!
 //! ## Example Pipelines
-//! 
+//!
 //! ### Basic Video Receiving
 //! ```bash
 //! # Simple video receiving and display
@@ -81,10 +81,10 @@ pub mod imp;
 
 glib::wrapper! {
     /// A GStreamer source element that subscribes to data via Zenoh.
-    /// 
+    ///
     /// This element subscribes to a Zenoh key expression and outputs
     /// received data as GStreamer buffers to downstream elements.
-    pub struct ZenohSrc(ObjectSubclass<imp::ZenohSrc>) @extends gst_base::PushSrc, gst_base::BaseSrc, gst::Element, gst::Object;
+    pub struct ZenohSrc(ObjectSubclass<imp::ZenohSrc>) @extends gst_base::PushSrc, gst_base::BaseSrc, gst::Element, gst::Object, @implements gst::URIHandler;
 }
 
 pub fn register(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
