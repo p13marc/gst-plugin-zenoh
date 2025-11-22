@@ -16,12 +16,24 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     )
 });
 
+/// Statistics tracking for ZenohSink
+#[derive(Debug, Clone, Default)]
+struct Statistics {
+    bytes_sent: u64,
+    messages_sent: u64,
+    errors: u64,
+    dropped: u64, // For congestion-control=drop mode
+    start_time: Option<gst::ClockTime>,
+}
+
 struct Started {
     // Keeping session field to maintain ownership and prevent session from being dropped
     // while publisher is still in use. This can be either owned or shared.
     #[allow(dead_code)]
     session: SessionWrapper,
     publisher: zenoh::pubsub::Publisher<'static>,
+    /// Statistics tracking (shared for thread-safe updates)
+    stats: Arc<Mutex<Statistics>>,
 }
 
 /// Wrapper to handle both owned and shared Zenoh sessions.
@@ -224,6 +236,27 @@ impl ObjectImpl for ZenohSink {
                     .blurb("Enable ultra-low latency mode by bypassing internal queues (increases CPU usage but reduces end-to-end latency)")
                     .default_value(false)
                     .build(),
+                // Statistics properties (read-only)
+                glib::ParamSpecUInt64::builder("bytes-sent")
+                    .nick("Bytes Sent")
+                    .blurb("Total bytes sent since element started")
+                    .read_only()
+                    .build(),
+                glib::ParamSpecUInt64::builder("messages-sent")
+                    .nick("Messages Sent")
+                    .blurb("Total messages sent since element started")
+                    .read_only()
+                    .build(),
+                glib::ParamSpecUInt64::builder("errors")
+                    .nick("Errors")
+                    .blurb("Total number of errors encountered")
+                    .read_only()
+                    .build(),
+                glib::ParamSpecUInt64::builder("dropped")
+                    .nick("Dropped")
+                    .blurb("Total messages dropped due to congestion (drop mode)")
+                    .read_only()
+                    .build(),
             ]
         });
 
@@ -312,15 +345,54 @@ impl ObjectImpl for ZenohSink {
     }
 
     fn property(&self, _id: usize, pspec: &gst::glib::ParamSpec) -> gst::glib::Value {
-        let settings = self.settings.lock().unwrap();
-
         match pspec.name() {
-            "key-expr" => settings.key_expr.to_value(),
-            "config" => settings.config_file.to_value(),
-            "priority" => (settings.priority as u32).to_value(),
-            "congestion-control" => settings.congestion_control.to_value(),
-            "reliability" => settings.reliability.to_value(),
-            "express" => settings.express.to_value(),
+            // Configuration properties - read from settings
+            "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
+            | "express" => {
+                let settings = self.settings.lock().unwrap();
+                match pspec.name() {
+                    "key-expr" => settings.key_expr.to_value(),
+                    "config" => settings.config_file.to_value(),
+                    "priority" => (settings.priority as u32).to_value(),
+                    "congestion-control" => settings.congestion_control.to_value(),
+                    "reliability" => settings.reliability.to_value(),
+                    "express" => settings.express.to_value(),
+                    _ => unreachable!(),
+                }
+            }
+            // Statistics properties - read from state
+            "bytes-sent" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.stats.lock().unwrap().bytes_sent.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
+            "messages-sent" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.stats.lock().unwrap().messages_sent.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
+            "errors" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.stats.lock().unwrap().errors.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
+            "dropped" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.stats.lock().unwrap().dropped.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
                 // Return an empty string value as default
@@ -492,6 +564,15 @@ impl BaseSinkImpl for ZenohSink {
         *state = State::Started(Started {
             session: session_wrapper,
             publisher,
+            stats: Arc::new(Mutex::new(Statistics {
+                start_time: Some(gst::ClockTime::from_nseconds(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64,
+                )),
+                ..Default::default()
+            })),
         });
         gst::debug!(CAT, "ZenohSink successfully transitioned to Started state");
 
@@ -517,25 +598,36 @@ impl BaseSinkImpl for ZenohSink {
 
         // Send directly using synchronous API with proper error handling
         // Note: Zenoh's wait() already handles timeouts internally
-        started.publisher.put(b.as_slice()).wait().map_err(|e| {
-            // Check if this is a network-related error before consuming e
-            let error_msg = format!("{}", e);
-            let err = ZenohError::PublishError(e);
-            if error_msg.contains("timeout")
-                || error_msg.contains("connection")
-                || error_msg.contains("network")
-            {
-                gst::element_imp_error!(
-                    self,
-                    gst::ResourceError::Write,
-                    ["Network error while publishing: {}", err]
-                );
-            } else {
-                gst::element_imp_error!(self, gst::ResourceError::Write, ["{}", err]);
+        match started.publisher.put(b.as_slice()).wait() {
+            Ok(_) => {
+                // Update statistics on success
+                let mut stats = started.stats.lock().unwrap();
+                stats.bytes_sent += b.len() as u64;
+                stats.messages_sent += 1;
+                Ok(gst::FlowSuccess::Ok)
             }
-            err.to_flow_error()
-        })?;
-        Ok(gst::FlowSuccess::Ok)
+            Err(e) => {
+                // Update error statistics
+                started.stats.lock().unwrap().errors += 1;
+
+                // Check if this is a network-related error before consuming e
+                let error_msg = format!("{}", e);
+                let err = ZenohError::PublishError(e);
+                if error_msg.contains("timeout")
+                    || error_msg.contains("connection")
+                    || error_msg.contains("network")
+                {
+                    gst::element_imp_error!(
+                        self,
+                        gst::ResourceError::Write,
+                        ["Network error while publishing: {}", err]
+                    );
+                } else {
+                    gst::element_imp_error!(self, gst::ResourceError::Write, ["{}", err]);
+                }
+                Err(err.to_flow_error())
+            }
+        }
     }
 
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
@@ -559,7 +651,7 @@ impl BaseSinkImpl for ZenohSink {
                 "Stopping ZenohSink from non-started state: {}",
                 current_state
             );
-}
+        }
 
         if let State::Started(ref _started) = *state {
             gst::debug!(CAT, "ZenohSink transitioning from Started to Stopping");

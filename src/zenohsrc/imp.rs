@@ -17,6 +17,15 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new("zenohsrc", gst::DebugColorFlags::empty(), Some("Zenoh Src"))
 });
 
+/// Statistics tracking for ZenohSrc
+#[derive(Debug, Clone, Default)]
+struct Statistics {
+    bytes_received: u64,
+    messages_received: u64,
+    errors: u64,
+    start_time: Option<gst::ClockTime>,
+}
+
 struct Started {
     // Keeping session field to maintain ownership and prevent session from being dropped
     // while subscriber is still in use. This can be either owned or shared.
@@ -26,6 +35,8 @@ struct Started {
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
     /// Flag to signal that the element is flushing and should cancel blocking operations
     flushing: Arc<AtomicBool>,
+    /// Statistics tracking (shared for thread-safe updates)
+    stats: Arc<Mutex<Statistics>>,
 }
 
 /// Wrapper to handle both owned and shared Zenoh sessions.
@@ -207,6 +218,22 @@ impl ObjectImpl for ZenohSrc {
                     .blurb("Expected reliability mode (informational): 'best-effort' or 'reliable'. Actual reliability is determined by publisher.")
                     .default_value(Some("best-effort"))
                     .build(),
+                // Statistics properties (read-only)
+                glib::ParamSpecUInt64::builder("bytes-received")
+                    .nick("Bytes Received")
+                    .blurb("Total bytes received since element started")
+                    .read_only()
+                    .build(),
+                glib::ParamSpecUInt64::builder("messages-received")
+                    .nick("Messages Received")
+                    .blurb("Total messages received since element started")
+                    .read_only()
+                    .build(),
+                glib::ParamSpecUInt64::builder("errors")
+                    .nick("Errors")
+                    .blurb("Total number of errors encountered")
+                    .read_only()
+                    .build(),
             ]
         });
 
@@ -287,14 +314,44 @@ impl ObjectImpl for ZenohSrc {
     }
 
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-        let settings = self.settings.lock().unwrap();
-
         match pspec.name() {
-            "key-expr" => settings.key_expr.to_value(),
-            "config" => settings.config_file.to_value(),
-            "priority" => (settings.priority as u32).to_value(),
-            "congestion-control" => settings.congestion_control.to_value(),
-            "reliability" => settings.reliability.to_value(),
+            // Configuration properties - read from settings
+            "key-expr" | "config" | "priority" | "congestion-control" | "reliability" => {
+                let settings = self.settings.lock().unwrap();
+                match pspec.name() {
+                    "key-expr" => settings.key_expr.to_value(),
+                    "config" => settings.config_file.to_value(),
+                    "priority" => (settings.priority as u32).to_value(),
+                    "congestion-control" => settings.congestion_control.to_value(),
+                    "reliability" => settings.reliability.to_value(),
+                    _ => unreachable!(),
+                }
+            }
+            // Statistics properties - read from state
+            "bytes-received" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.stats.lock().unwrap().bytes_received.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
+            "messages-received" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.stats.lock().unwrap().messages_received.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
+            "errors" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.stats.lock().unwrap().errors.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
                 // Return an empty string value as default
@@ -428,6 +485,15 @@ impl BaseSrcImpl for ZenohSrc {
             session: session_wrapper,
             subscriber,
             flushing: Arc::new(AtomicBool::new(false)),
+            stats: Arc::new(Mutex::new(Statistics {
+                start_time: Some(gst::ClockTime::from_nseconds(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos() as u64,
+                )),
+                ..Default::default()
+            })),
         });
 
         gst::debug!(CAT, "ZenohSrc successfully transitioned to Started state");
@@ -568,6 +634,7 @@ impl PushSrcImpl for ZenohSrc {
                         continue;
                     } else {
                         // Disconnected or other error
+                        started.stats.lock().unwrap().errors += 1;
                         gst::element_imp_error!(
                             self,
                             gst::ResourceError::Read,
@@ -610,6 +677,12 @@ impl PushSrcImpl for ZenohSrc {
                 );
                 gst::FlowError::Error
             })?;
+
+        // Update statistics on success
+        let mut stats = started.stats.lock().unwrap();
+        stats.bytes_received += slice.len() as u64;
+        stats.messages_received += 1;
+        drop(stats);
 
         Ok(CreateSuccess::NewBuffer(buffer))
     }
