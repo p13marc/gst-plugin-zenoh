@@ -29,6 +29,7 @@ Together, these elements enable distributed media applications, edge computing s
 - **Batch Rendering**: Efficient buffer list processing for high-throughput scenarios
 - **Responsive State Changes**: Sub-second response to pipeline state changes with proper unlock/flush support
 - **Optimized Data Paths**: Minimal overhead with efficient memory handling
+- **Optional Compression**: Reduce bandwidth usage with Zstandard, LZ4, or Gzip compression (compile-time optional)
 
 ### Flexible Configuration
 - **URI Handler Support**: Configure elements using standard GStreamer URI syntax (e.g., `zenoh:demo/video?priority=2&reliability=reliable`)
@@ -71,7 +72,16 @@ Together, these elements enable distributed media applications, edge computing s
 
 2. **Build the Plugin**:
    ```bash
+   # Basic build (no compression)
    cargo build --release
+   
+   # With all compression algorithms
+   cargo build --release --features compression
+   
+   # With specific compression algorithms
+   cargo build --release --features compression-zstd
+   cargo build --release --features compression-lz4
+   cargo build --release --features compression-gzip
    ```
 
 3. **Run Examples**:
@@ -145,6 +155,71 @@ gst-launch-1.0 zenohsrc key-expr=edge/camera/raw ! \
   zenohsink key-expr=edge/ai/detections reliability=reliable express=true
 ```
 
+## 🗜️ Compression Support
+
+The plugin supports optional compression to reduce bandwidth usage. Compression is **compile-time optional** and must be enabled via Cargo features.
+
+### Available Compression Algorithms
+
+| Algorithm | Feature Flag | Characteristics | Best For |
+|-----------|--------------|-----------------|----------|
+| **Zstandard** | `compression-zstd` | Best compression ratio, good speed | General purpose, bandwidth-limited networks |
+| **LZ4** | `compression-lz4` | Fastest compression, lower ratio | Low-latency, CPU-constrained systems |
+| **Gzip** | `compression-gzip` | Widely compatible, moderate speed | Cross-platform compatibility |
+
+### Building with Compression
+
+```bash
+# Enable all compression algorithms
+cargo build --release --features compression
+
+# Enable specific algorithms
+cargo build --release --features compression-zstd
+cargo build --release --features compression-lz4,compression-gzip
+```
+
+### Usage
+
+Compression is configured on the **sender side** (`zenohsink`) and automatically detected and decompressed on the **receiver side** (`zenohsrc`).
+
+```bash
+# Sender with Zstandard compression (recommended)
+gst-launch-1.0 videotestsrc ! \
+  zenohsink key-expr=demo/compressed compression=zstd compression-level=5
+
+# Receiver (automatically decompresses)
+gst-launch-1.0 zenohsrc key-expr=demo/compressed ! videoconvert ! autovideosink
+```
+
+### Compression Levels
+
+- **1-3**: Fast compression, larger output (low CPU usage)
+- **4-6**: Balanced (recommended for most use cases)
+- **7-9**: Maximum compression, slower (high CPU usage)
+
+### Compression Statistics
+
+When compression is enabled, `zenohsink` provides additional statistics:
+
+| Property | Description |
+|----------|-------------|
+| `bytes-before-compression` | Total bytes before compression |
+| `bytes-after-compression` | Total bytes after compression (network usage) |
+
+**Calculate compression ratio:**
+```bash
+# Query compression statistics
+gst-inspect-1.0 zenohsink | grep bytes-
+
+# Example: 1GB before -> 300MB after = 70% bandwidth savings
+```
+
+### Performance Considerations
+
+- **Zstandard**: Best all-around choice, excellent compression at level 5
+- **LZ4**: Choose when CPU is limited or ultra-low latency is critical
+- **Gzip**: Use for compatibility with non-Rust receivers
+
 ## 📊 Statistics Monitoring
 
 Both `zenohsink` and `zenohsrc` provide real-time statistics for monitoring performance and debugging issues. All statistics properties are read-only and thread-safe.
@@ -153,10 +228,12 @@ Both `zenohsink` and `zenohsrc` provide real-time statistics for monitoring perf
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `bytes-sent` | UInt64 | Total bytes published to Zenoh network |
+| `bytes-sent` | UInt64 | Total bytes published to Zenoh network (after compression if enabled) |
 | `messages-sent` | UInt64 | Total number of buffers published |
 | `errors` | UInt64 | Number of publish errors encountered |
 | `dropped` | UInt64 | Number of buffers dropped due to congestion (when `congestion-control=drop`) |
+| `bytes-before-compression` | UInt64 | Total bytes before compression (compression features only) |
+| `bytes-after-compression` | UInt64 | Total bytes after compression (compression features only) |
 
 ### ZenohSrc Statistics
 
@@ -322,6 +399,8 @@ if let Some(uri_handler) = sink.dynamic_cast_ref::<gst::URIHandler>() {
 | `express` | Boolean | `false` | Enable express mode for ultra-low latency (bypasses internal queues) |
 | `send-caps` | Boolean | `true` | Enable caps transmission as metadata (automatic format negotiation) |
 | `caps-interval` | Integer | `1` | Interval in seconds to send caps periodically (0 = only first buffer and format changes) |
+| `compression` | Enum | `none` | Compression algorithm: `none`, `zstd`, `lz4`, or `gzip` (requires compilation with compression features) |
+| `compression-level` | Integer | `5` | Compression level (1=fastest/largest, 9=slowest/smallest, 5=balanced) |
 
 #### Usage Examples:
 ```bash
@@ -336,6 +415,19 @@ zenohsink key-expr=optimized/stream caps-interval=0
 
 # Disable caps entirely for absolute minimal overhead
 zenohsink key-expr=nocaps/stream send-caps=false
+
+# Compression examples (requires compression features enabled at compile time)
+# High compression for bandwidth-limited networks (Zstandard)
+zenohsink key-expr=compressed/video compression=zstd compression-level=9
+
+# Balanced compression (recommended for most cases)
+zenohsink key-expr=compressed/video compression=zstd compression-level=5
+
+# Fast compression with minimal CPU overhead (LZ4)
+zenohsink key-expr=compressed/video compression=lz4 compression-level=1
+
+# Compatible compression (Gzip - widely supported)
+zenohsink key-expr=compressed/video compression=gzip compression-level=6
 ```
 
 ### ZenohSrc Properties

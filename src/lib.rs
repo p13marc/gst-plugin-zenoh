@@ -79,6 +79,13 @@ pub mod utils;
 mod zenohsink;
 mod zenohsrc;
 
+#[cfg(any(
+    feature = "compression-zstd",
+    feature = "compression-lz4",
+    feature = "compression-gzip"
+))]
+pub mod compression;
+
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     zenohsink::register(plugin)?;
     zenohsrc::register(plugin)?;

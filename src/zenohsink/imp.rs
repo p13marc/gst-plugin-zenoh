@@ -28,6 +28,18 @@ struct Statistics {
     errors: u64,
     dropped: u64, // For congestion-control=drop mode
     start_time: Option<gst::ClockTime>,
+    #[cfg(any(
+        feature = "compression-zstd",
+        feature = "compression-lz4",
+        feature = "compression-gzip"
+    ))]
+    bytes_before_compression: u64,
+    #[cfg(any(
+        feature = "compression-zstd",
+        feature = "compression-lz4",
+        feature = "compression-gzip"
+    ))]
+    bytes_after_compression: u64,
 }
 
 struct Started {
@@ -117,6 +129,20 @@ struct Settings {
     send_caps: bool,
     /// Interval in seconds to send caps periodically (0 = only on first buffer and changes, default: 1)
     caps_interval: u32,
+    /// Compression algorithm to use (requires compression features)
+    #[cfg(any(
+        feature = "compression-zstd",
+        feature = "compression-lz4",
+        feature = "compression-gzip"
+    ))]
+    compression: crate::compression::CompressionType,
+    /// Compression level (1-9, higher = better compression but slower)
+    #[cfg(any(
+        feature = "compression-zstd",
+        feature = "compression-lz4",
+        feature = "compression-gzip"
+    ))]
+    compression_level: i32,
     /// Optional external Zenoh session to share with other elements
     external_session: Option<Arc<zenoh::Session>>,
 }
@@ -132,6 +158,18 @@ impl Default for Settings {
             express: false,
             send_caps: true,  // Default to sending caps for ease of use
             caps_interval: 1, // Send caps every 1 second by default
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            compression: crate::compression::CompressionType::None,
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            compression_level: 5, // Medium compression level
             external_session: None,
         }
     }
@@ -266,6 +304,28 @@ impl ObjectImpl for ZenohSink {
                     .minimum(0)
                     .maximum(3600)
                     .build(),
+                // Compression properties (conditional on features)
+                #[cfg(any(
+                    feature = "compression-zstd",
+                    feature = "compression-lz4",
+                    feature = "compression-gzip"
+                ))]
+                glib::ParamSpecEnum::builder_with_default("compression", crate::compression::CompressionType::None)
+                    .nick("Compression")
+                    .blurb("Compression algorithm to use: none (default), zstd (best ratio), lz4 (fastest), or gzip (compatible)")
+                    .build(),
+                #[cfg(any(
+                    feature = "compression-zstd",
+                    feature = "compression-lz4",
+                    feature = "compression-gzip"
+                ))]
+                glib::ParamSpecInt::builder("compression-level")
+                    .nick("Compression Level")
+                    .blurb("Compression level (1=fastest/largest, 9=slowest/smallest, 5=balanced default)")
+                    .default_value(5)
+                    .minimum(1)
+                    .maximum(9)
+                    .build(),
                 // Statistics properties (read-only)
                 glib::ParamSpecUInt64::builder("bytes-sent")
                     .nick("Bytes Sent")
@@ -285,6 +345,27 @@ impl ObjectImpl for ZenohSink {
                 glib::ParamSpecUInt64::builder("dropped")
                     .nick("Dropped")
                     .blurb("Total messages dropped due to congestion (drop mode)")
+                    .read_only()
+                    .build(),
+                // Compression statistics (conditional on features)
+                #[cfg(any(
+                    feature = "compression-zstd",
+                    feature = "compression-lz4",
+                    feature = "compression-gzip"
+                ))]
+                glib::ParamSpecUInt64::builder("bytes-before-compression")
+                    .nick("Bytes Before Compression")
+                    .blurb("Total bytes before compression")
+                    .read_only()
+                    .build(),
+                #[cfg(any(
+                    feature = "compression-zstd",
+                    feature = "compression-lz4",
+                    feature = "compression-gzip"
+                ))]
+                glib::ParamSpecUInt64::builder("bytes-after-compression")
+                    .nick("Bytes After Compression")
+                    .blurb("Total bytes after compression (actually sent over network)")
                     .read_only()
                     .build(),
             ]
@@ -374,6 +455,34 @@ impl ObjectImpl for ZenohSink {
             "caps-interval" => {
                 settings.caps_interval = value.get::<u32>().expect("type checked upstream");
             }
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            "compression" => {
+                settings.compression = value
+                    .get::<crate::compression::CompressionType>()
+                    .expect("type checked upstream");
+            }
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            "compression-level" => {
+                let level = value.get::<i32>().expect("type checked upstream");
+                if (1..=9).contains(&level) {
+                    settings.compression_level = level;
+                } else {
+                    gst::warning!(
+                        CAT,
+                        "Invalid compression level '{}', must be 1-9, using default",
+                        level
+                    );
+                    settings.compression_level = 5;
+                }
+            }
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
             }
@@ -397,6 +506,24 @@ impl ObjectImpl for ZenohSink {
                     "caps-interval" => settings.caps_interval.to_value(),
                     _ => unreachable!(),
                 }
+            }
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            "compression" => {
+                let settings = self.settings.lock().unwrap();
+                settings.compression.to_value()
+            }
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            "compression-level" => {
+                let settings = self.settings.lock().unwrap();
+                settings.compression_level.to_value()
             }
             // Statistics properties - read from state
             "bytes-sent" => {
@@ -427,6 +554,42 @@ impl ObjectImpl for ZenohSink {
                 let state = self.state.lock().unwrap();
                 if let State::Started(ref started) = *state {
                     started.stats.lock().unwrap().dropped.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            "bytes-before-compression" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started
+                        .stats
+                        .lock()
+                        .unwrap()
+                        .bytes_before_compression
+                        .to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            "bytes-after-compression" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started
+                        .stats
+                        .lock()
+                        .unwrap()
+                        .bytes_after_compression
+                        .to_value()
                 } else {
                     0u64.to_value()
                 }
@@ -647,6 +810,64 @@ impl BaseSinkImpl for ZenohSink {
             gst::FlowError::Error
         })?;
 
+        // Get compression settings and original size
+        let original_size = b.len();
+
+        #[cfg(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        ))]
+        let (compression_type, compression_level) = {
+            let settings = self.settings.lock().unwrap();
+            (settings.compression, settings.compression_level)
+        };
+
+        // Apply compression if enabled
+        #[cfg(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        ))]
+        let (data_to_send, compressed) = if compression_type
+            != crate::compression::CompressionType::None
+        {
+            match crate::compression::compress(b.as_slice(), compression_type, compression_level) {
+                Ok(compressed_data) => {
+                    gst::trace!(
+                        CAT,
+                        imp = self,
+                        "Compressed {} bytes to {} bytes using {:?} (level {}), ratio: {:.2}%",
+                        original_size,
+                        compressed_data.len(),
+                        compression_type,
+                        compression_level,
+                        (compressed_data.len() as f64 / original_size as f64) * 100.0
+                    );
+                    (compressed_data, true)
+                }
+                Err(e) => {
+                    gst::warning!(
+                        CAT,
+                        imp = self,
+                        "Compression failed: {}, sending uncompressed",
+                        e
+                    );
+                    started.stats.lock().unwrap().errors += 1;
+                    (b.as_slice().to_vec(), false)
+                }
+            }
+        } else {
+            (b.as_slice().to_vec(), false)
+        };
+
+        #[cfg(not(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        )))]
+        let (data_to_send, compressed) = (b.as_slice().to_vec(), false);
+
         // Smart caps transmission: send caps when needed, not on every buffer
         let (send_caps, caps_interval) = {
             let settings = self.settings.lock().unwrap();
@@ -699,7 +920,43 @@ impl BaseSinkImpl for ZenohSink {
                 }
 
                 if should_send {
-                    MetadataBuilder::new().caps(&caps).build()
+                    let mut metadata_builder = MetadataBuilder::new().caps(&caps);
+
+                    // Add compression metadata if compressed
+                    #[cfg(any(
+                        feature = "compression-zstd",
+                        feature = "compression-lz4",
+                        feature = "compression-gzip"
+                    ))]
+                    if compressed {
+                        metadata_builder = metadata_builder.user_metadata(
+                            crate::metadata::keys::COMPRESSION,
+                            compression_type.to_metadata_value(),
+                        );
+                    }
+
+                    metadata_builder.build()
+                } else if compressed {
+                    // Even if not sending caps, we need to send compression metadata
+                    #[cfg(any(
+                        feature = "compression-zstd",
+                        feature = "compression-lz4",
+                        feature = "compression-gzip"
+                    ))]
+                    {
+                        MetadataBuilder::new()
+                            .user_metadata(
+                                crate::metadata::keys::COMPRESSION,
+                                compression_type.to_metadata_value(),
+                            )
+                            .build()
+                    }
+                    #[cfg(not(any(
+                        feature = "compression-zstd",
+                        feature = "compression-lz4",
+                        feature = "compression-gzip"
+                    )))]
+                    None
                 } else {
                     None
                 }
@@ -712,7 +969,7 @@ impl BaseSinkImpl for ZenohSink {
 
         // Send with caps attachment on every buffer
         // Note: Zenoh's wait() already handles timeouts internally
-        let put_builder = started.publisher.put(b.as_slice());
+        let put_builder = started.publisher.put(&data_to_send);
         let result = if let Some(attachment) = attachment {
             put_builder.attachment(attachment).wait()
         } else {
@@ -723,8 +980,19 @@ impl BaseSinkImpl for ZenohSink {
             Ok(_) => {
                 // Update statistics on success
                 let mut stats = started.stats.lock().unwrap();
-                stats.bytes_sent += b.len() as u64;
+                stats.bytes_sent += data_to_send.len() as u64;
                 stats.messages_sent += 1;
+
+                #[cfg(any(
+                    feature = "compression-zstd",
+                    feature = "compression-lz4",
+                    feature = "compression-gzip"
+                ))]
+                if compressed {
+                    stats.bytes_before_compression += original_size as u64;
+                    stats.bytes_after_compression += data_to_send.len() as u64;
+                }
+
                 Ok(gst::FlowSuccess::Ok)
             }
             Err(e) => {

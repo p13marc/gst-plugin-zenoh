@@ -17,6 +17,8 @@ pub mod keys {
     pub const USER_PREFIX: &str = "user.";
     /// Metadata format version
     pub const VERSION: &str = "gst.version";
+    /// Compression algorithm used (if any)
+    pub const COMPRESSION: &str = "gst.compression";
 }
 
 /// Current metadata format version

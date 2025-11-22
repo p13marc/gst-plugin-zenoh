@@ -678,6 +678,56 @@ impl PushSrcImpl for ZenohSrc {
         };
 
         // Check if the sample has attachment metadata (caps, custom metadata, etc.)
+        #[cfg(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        ))]
+        let compression_type = if let Some(attachment) = sample.attachment() {
+            match MetadataParser::parse(attachment) {
+                Ok(metadata) => {
+                    // If caps are present in metadata, set them on the source pad
+                    if let Some(caps) = metadata.caps() {
+                        gst::debug!(CAT, imp = self, "Received caps from metadata: {}", caps);
+
+                        // Set caps on the source pad
+                        if let Err(e) = self.obj().set_caps(caps) {
+                            gst::warning!(CAT, imp = self, "Failed to set caps: {}", e);
+                        }
+                    }
+
+                    // Check for compression metadata
+                    let compression = metadata
+                        .user_metadata()
+                        .get(crate::metadata::keys::COMPRESSION)
+                        .and_then(|v| crate::compression::CompressionType::from_metadata_value(v));
+
+                    // Log any user metadata
+                    if !metadata.user_metadata().is_empty() {
+                        gst::trace!(
+                            CAT,
+                            imp = self,
+                            "Received user metadata: {:?}",
+                            metadata.user_metadata()
+                        );
+                    }
+
+                    compression
+                }
+                Err(e) => {
+                    gst::warning!(CAT, imp = self, "Failed to parse metadata: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        #[cfg(not(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        )))]
         if let Some(attachment) = sample.attachment() {
             match MetadataParser::parse(attachment) {
                 Ok(metadata) => {
@@ -708,7 +758,47 @@ impl PushSrcImpl for ZenohSrc {
         }
 
         let payload = sample.payload();
-        let slice = payload.to_bytes();
+        let compressed_data = payload.to_bytes();
+
+        // Decompress if needed
+        #[cfg(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        ))]
+        let slice = if let Some(comp_type) = compression_type {
+            match crate::compression::decompress(&compressed_data, comp_type) {
+                Ok(decompressed) => {
+                    gst::trace!(
+                        CAT,
+                        imp = self,
+                        "Decompressed {} bytes to {} bytes using {:?}",
+                        compressed_data.len(),
+                        decompressed.len(),
+                        comp_type
+                    );
+                    decompressed
+                }
+                Err(e) => {
+                    started.stats.lock().unwrap().errors += 1;
+                    gst::element_imp_error!(
+                        self,
+                        gst::StreamError::Decode,
+                        ["Decompression failed: {}", e]
+                    );
+                    return Err(gst::FlowError::Error);
+                }
+            }
+        } else {
+            compressed_data.to_vec()
+        };
+
+        #[cfg(not(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        )))]
+        let slice = compressed_data.to_vec();
 
         let mut buffer = gst::Buffer::with_size(slice.len()).map_err(|_| {
             gst::element_imp_error!(
