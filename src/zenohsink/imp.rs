@@ -632,6 +632,99 @@ impl BaseSinkImpl for ZenohSink {
         }
     }
 
+    fn render_list(&self, list: &gst::BufferList) -> Result<gst::FlowSuccess, gst::FlowError> {
+        gst::debug!(
+            CAT,
+            imp = self,
+            "Rendering buffer list with {} buffers",
+            list.len()
+        );
+
+        let state_locked = self.state.lock().unwrap();
+        let State::Started(ref started) = *state_locked else {
+            gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
+            return Err(gst::FlowError::Error);
+        };
+
+        // Track statistics for the batch
+        let mut total_bytes = 0u64;
+        let mut total_messages = 0u64;
+        let mut errors_count = 0u64;
+
+        // Process each buffer in the list
+        for buffer in list.iter() {
+            // Get buffer data
+            let b = buffer.map_readable().map_err(|_| {
+                gst::element_imp_error!(
+                    self,
+                    gst::ResourceError::Read,
+                    ["Failed to map buffer for reading in buffer list"]
+                );
+                errors_count += 1;
+                gst::FlowError::Error
+            })?;
+
+            // Send buffer
+            match started.publisher.put(b.as_slice()).wait() {
+                Ok(_) => {
+                    total_bytes += b.len() as u64;
+                    total_messages += 1;
+                }
+                Err(e) => {
+                    errors_count += 1;
+                    let error_msg = format!("{}", e);
+                    let err = ZenohError::PublishError(e);
+
+                    if error_msg.contains("timeout")
+                        || error_msg.contains("connection")
+                        || error_msg.contains("network")
+                    {
+                        gst::warning!(CAT, imp = self, "Network error in buffer list: {}", err);
+                    } else {
+                        gst::warning!(CAT, imp = self, "Error publishing buffer in list: {}", err);
+                    }
+
+                    // Continue processing remaining buffers instead of failing immediately
+                    // This provides better resilience for batch operations
+                }
+            }
+        }
+
+        // Update statistics in a single operation for better performance
+        {
+            let mut stats = started.stats.lock().unwrap();
+            stats.bytes_sent += total_bytes;
+            stats.messages_sent += total_messages;
+            stats.errors += errors_count;
+        }
+
+        if errors_count > 0 {
+            gst::warning!(
+                CAT,
+                imp = self,
+                "Completed buffer list with {} errors out of {} buffers",
+                errors_count,
+                list.len()
+            );
+        }
+
+        // Return success if at least one buffer was sent successfully
+        if total_messages > 0 {
+            Ok(gst::FlowSuccess::Ok)
+        } else if errors_count > 0 {
+            // All buffers failed
+            gst::element_imp_error!(
+                self,
+                gst::ResourceError::Write,
+                ["Failed to send all buffers in list"]
+            );
+            Err(gst::FlowError::Error)
+        } else {
+            // Empty list
+            Ok(gst::FlowSuccess::Ok)
+        }
+    }
+
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
         let mut state = self.state.lock().unwrap();
 
