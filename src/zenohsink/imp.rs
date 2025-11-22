@@ -27,6 +27,7 @@ struct Statistics {
     messages_sent: u64,
     errors: u64,
     dropped: u64, // For congestion-control=drop mode
+    #[allow(dead_code)]
     start_time: Option<gst::ClockTime>,
     #[cfg(any(
         feature = "compression-zstd",
@@ -396,6 +397,18 @@ impl ObjectImpl for ZenohSink {
             return;
         }
         drop(state);
+
+        // Note: priority, express, reliability, and congestion-control are locked after start
+        // because Zenoh Publishers are immutable - QoS is set during publisher creation.
+        // The Zenoh API does not support changing QoS parameters on publisher.put().
+        // To implement runtime QoS changes would require recreating the publisher,
+        // which adds significant complexity and risk of data loss during transition.
+        //
+        // Properties that CAN be changed at runtime:
+        // - send-caps: Simple boolean check
+        // - caps-interval: Simple integer check
+        // - compression: Applied per-buffer
+        // - compression-level: Applied per-buffer
 
         let mut settings = self.settings.lock().unwrap();
 
@@ -810,7 +823,12 @@ impl BaseSinkImpl for ZenohSink {
             gst::FlowError::Error
         })?;
 
-        // Get compression settings and original size
+        // Get original size for compression statistics
+        #[cfg(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        ))]
         let original_size = b.len();
 
         #[cfg(any(
@@ -920,7 +938,19 @@ impl BaseSinkImpl for ZenohSink {
                 }
 
                 if should_send {
+                    #[cfg(any(
+                        feature = "compression-zstd",
+                        feature = "compression-lz4",
+                        feature = "compression-gzip"
+                    ))]
                     let mut metadata_builder = MetadataBuilder::new().caps(&caps);
+
+                    #[cfg(not(any(
+                        feature = "compression-zstd",
+                        feature = "compression-lz4",
+                        feature = "compression-gzip"
+                    )))]
+                    let metadata_builder = MetadataBuilder::new().caps(&caps);
 
                     // Add compression metadata if compressed
                     #[cfg(any(
@@ -967,7 +997,7 @@ impl BaseSinkImpl for ZenohSink {
             None
         };
 
-        // Send with caps attachment on every buffer
+        // Send with caps attachment
         // Note: Zenoh's wait() already handles timeouts internally
         let put_builder = started.publisher.put(&data_to_send);
         let result = if let Some(attachment) = attachment {
@@ -1045,7 +1075,7 @@ impl BaseSinkImpl for ZenohSink {
         let mut total_messages = 0u64;
         let mut errors_count = 0u64;
 
-        // Use same smart caps logic as render() - reuse the decision
+        // Get caps settings
         let (send_caps, caps_interval) = {
             let settings = self.settings.lock().unwrap();
             (settings.send_caps, settings.caps_interval)
@@ -1112,7 +1142,7 @@ impl BaseSinkImpl for ZenohSink {
                 gst::FlowError::Error
             })?;
 
-            // Send buffer with caps attachment (all buffers get same attachment)
+            // Send buffer with caps attachment
             let put_builder = started.publisher.put(b.as_slice());
             let result = if let Some(ref attachment) = caps_attachment {
                 put_builder.attachment(attachment.clone()).wait()

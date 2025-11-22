@@ -10,7 +10,7 @@ use gst_base::{
 };
 use zenoh::Wait;
 
-use crate::error::{ErrorHandling, FlowErrorHandling, ZenohError};
+use crate::error::{ErrorHandling, ZenohError};
 use crate::metadata::MetadataParser;
 
 // Define debug category for logging
@@ -25,6 +25,7 @@ struct Statistics {
     bytes_received: u64,
     messages_received: u64,
     errors: u64,
+    #[allow(dead_code)]
     start_time: Option<gst::ClockTime>,
 }
 

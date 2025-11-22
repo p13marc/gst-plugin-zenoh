@@ -138,7 +138,7 @@ fn test_uri_with_express_mode() {
     let priority: u32 = sink.property("priority");
 
     assert_eq!(key_expr, "demo/video");
-    assert_eq!(express, true);
+    assert!(express);
     assert_eq!(priority, 1);
 }
 

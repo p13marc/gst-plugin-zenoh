@@ -15,10 +15,11 @@ use gst::glib;
 use thiserror::Error;
 
 /// Compression algorithm selection
-#[derive(Debug, Clone, Copy, PartialEq, Eq, glib::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, glib::Enum, Default)]
 #[enum_type(name = "GstZenohCompression")]
 pub enum CompressionType {
     /// No compression
+    #[default]
     #[enum_value(name = "None", nick = "none")]
     None,
 
@@ -36,12 +37,6 @@ pub enum CompressionType {
     #[cfg(feature = "compression-gzip")]
     #[enum_value(name = "Gzip", nick = "gzip")]
     Gzip,
-}
-
-impl Default for CompressionType {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl CompressionType {

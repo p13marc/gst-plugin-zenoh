@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Custom error type for Zenoh operations
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum ZenohError {
     /// Error initializing Zenoh session
     #[error("Failed to initialize Zenoh session: {0}")]

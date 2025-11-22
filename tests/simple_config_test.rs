@@ -15,7 +15,7 @@ fn test_zenoh_sink_properties() {
     assert_eq!(sink.property::<u32>("priority"), 5); // Default Priority::Data
     assert_eq!(sink.property::<String>("congestion-control"), "block");
     assert_eq!(sink.property::<String>("reliability"), "best-effort");
-    assert_eq!(sink.property::<bool>("express"), false);
+    assert!(!sink.property::<bool>("express"));
 
     // Test setting properties
     sink.set_property("key-expr", "test/config");
@@ -29,7 +29,7 @@ fn test_zenoh_sink_properties() {
     assert_eq!(sink.property::<u32>("priority"), 1);
     assert_eq!(sink.property::<String>("congestion-control"), "drop");
     assert_eq!(sink.property::<String>("reliability"), "reliable");
-    assert_eq!(sink.property::<bool>("express"), true);
+    assert!(sink.property::<bool>("express"));
 }
 
 #[test]
@@ -139,7 +139,13 @@ fn test_priority_enum_validation() {
 
     for (value, name) in priorities {
         sink.set_property("priority", value);
-        assert_eq!(sink.property::<u32>("priority"), value, "Failed to set {} priority ({})", name, value);
+        assert_eq!(
+            sink.property::<u32>("priority"),
+            value,
+            "Failed to set {} priority ({})",
+            name,
+            value
+        );
     }
 
     // Note: GStreamer's property system rejects invalid values (0, 8) before they reach our validation,

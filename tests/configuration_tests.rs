@@ -64,11 +64,11 @@ fn test_zenoh_sink_express_mode() {
     sink.set_property("key-expr", "test/sink/express");
 
     // Test express mode disabled (default)
-    assert_eq!(sink.property::<bool>("express"), false);
+    assert!(!sink.property::<bool>("express"));
 
     // Test express mode enabled
     sink.set_property("express", true);
-    assert_eq!(sink.property::<bool>("express"), true);
+    assert!(sink.property::<bool>("express"));
 }
 
 #[test]
@@ -147,10 +147,10 @@ fn test_shared_session_functionality() {
     sink.set_property("key-expr", "test/sink/shared");
     sink.set_property("reliability", "reliable");
     sink.set_property("express", true);
-    
+
     // The element should be configurable even without external session
     assert_eq!(sink.property::<String>("reliability"), "reliable");
-    assert_eq!(sink.property::<bool>("express"), true);
+    assert!(sink.property::<bool>("express"));
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn test_end_to_end_configuration() {
     // Verify properties are set correctly
     assert_eq!(sink.property::<String>("reliability"), "reliable");
     assert_eq!(sink.property::<String>("congestion-control"), "block");
-    assert_eq!(sink.property::<bool>("express"), true);
+    assert!(sink.property::<bool>("express"));
     assert_eq!(sink.property::<u32>("priority"), 2);
     assert_eq!(src.property::<String>("reliability"), "reliable");
 }
