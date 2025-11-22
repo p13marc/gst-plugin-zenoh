@@ -25,7 +25,7 @@ struct Started {
 }
 
 /// Wrapper to handle both owned and shared Zenoh sessions.
-/// 
+///
 /// This allows the plugin to either create its own session or use
 /// a shared session provided externally, enabling session reuse
 /// across multiple GStreamer elements.
@@ -59,22 +59,22 @@ impl State {
     fn is_started(&self) -> bool {
         matches!(self, State::Started(_))
     }
-    
+
     fn is_stopped(&self) -> bool {
         matches!(self, State::Stopped)
     }
-    
+
     fn can_start(&self) -> bool {
         matches!(self, State::Stopped)
     }
-    
+
     fn can_stop(&self) -> bool {
         matches!(self, State::Started(_))
     }
 }
 
 /// Configuration settings for the ZenohSink element.
-/// 
+///
 /// These settings control how the element connects to and publishes
 /// data via the Zenoh network protocol.
 #[derive(Debug)]
@@ -114,11 +114,11 @@ impl Default for Settings {
 // to the GStreamer API for compatibility and future extension
 
 /// GStreamer ZenohSink element implementation.
-/// 
+///
 /// This element receives buffers from upstream GStreamer elements
 /// and publishes them to a Zenoh network using the configured
 /// key expression and quality of service parameters.
-/// 
+///
 /// The element supports:
 /// - Configurable reliability (best-effort/reliable)
 /// - Congestion control (block/drop)
@@ -198,7 +198,7 @@ impl ObjectImpl for ZenohSink {
                     .nick("Zenoh Configuration")
                     .blurb("Path to Zenoh configuration file for custom network settings (JSON5 format)")
                     .build(),
-                // Priority property  
+                // Priority property
                 glib::ParamSpecUInt::builder("priority")
                     .nick("Publisher Priority")
                     .blurb("Message priority level: 1=RealTime(highest), 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background(lowest)")
@@ -233,12 +233,26 @@ impl ObjectImpl for ZenohSink {
     fn set_property(&self, _id: usize, value: &gst::glib::Value, pspec: &gst::glib::ParamSpec) {
         // Check if we're in a state where property changes are allowed
         let state = self.state.lock().unwrap();
-        if state.is_started() && matches!(pspec.name(), "key-expr" | "config" | "express" | "reliability" | "congestion-control" | "priority") {
-            gst::warning!(CAT, "Cannot change property '{}' while element is started", pspec.name());
+        if state.is_started()
+            && matches!(
+                pspec.name(),
+                "key-expr"
+                    | "config"
+                    | "express"
+                    | "reliability"
+                    | "congestion-control"
+                    | "priority"
+            )
+        {
+            gst::warning!(
+                CAT,
+                "Cannot change property '{}' while element is started",
+                pspec.name()
+            );
             return;
         }
         drop(state);
-        
+
         let mut settings = self.settings.lock().unwrap();
 
         match pspec.name() {
@@ -256,7 +270,11 @@ impl ObjectImpl for ZenohSink {
                 if (1..=7).contains(&priority_val) {
                     settings.priority = priority_val;
                 } else {
-                    gst::warning!(CAT, "Invalid priority value '{}', must be 1-7, using default", priority_val);
+                    gst::warning!(
+                        CAT,
+                        "Invalid priority value '{}', must be 1-7, using default",
+                        priority_val
+                    );
                     settings.priority = 5; // Default to Priority::Data
                 }
             }
@@ -327,11 +345,15 @@ impl BaseSinkImpl for ZenohSink {
         if !state.can_start() {
             let current_state = match *state {
                 State::Stopped => "Stopped",
-                State::Starting => "Starting", 
+                State::Starting => "Starting",
                 State::Started(_) => "Started",
                 State::Stopping => "Stopping",
             };
-            gst::warning!(CAT, "Cannot start ZenohSink from state: {}, ignoring start request", current_state);
+            gst::warning!(
+                CAT,
+                "Cannot start ZenohSink from state: {}, ignoring start request",
+                current_state
+            );
             if state.is_started() {
                 return Ok(()); // Already started is not an error
             } else {
@@ -341,7 +363,7 @@ impl BaseSinkImpl for ZenohSink {
                 ));
             }
         }
-        
+
         gst::debug!(CAT, "ZenohSink transitioning from Stopped to Starting");
         *state = State::Starting;
         drop(state); // Release state lock before potentially long operations
@@ -397,11 +419,11 @@ impl BaseSinkImpl for ZenohSink {
             .map_err(|e| ZenohError::KeyExprError(e.to_string()).to_error_message())?;
 
         // Parse and validate configuration options for Zenoh publisher
-        
+
         // Priority: Zenoh priority levels (lower numeric value = higher priority)
         // 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background
         let zenoh_priority = Priority::try_from(priority).unwrap_or(Priority::default());
-        
+
         // Congestion control: How to handle network congestion
         // - Block: Wait until congestion clears (ensures delivery but may cause delays)
         // - Drop: Drop messages during congestion (maintains throughput but may lose data)
@@ -409,11 +431,15 @@ impl BaseSinkImpl for ZenohSink {
             "block" => CongestionControl::Block,
             "drop" => CongestionControl::Drop,
             _ => {
-                gst::warning!(CAT, "Unknown congestion control '{}', using default", congestion_control);
+                gst::warning!(
+                    CAT,
+                    "Unknown congestion control '{}', using default",
+                    congestion_control
+                );
                 CongestionControl::Block
             }
         };
-        
+
         // Reliability: Message delivery guarantees
         // - Reliable: Messages are acknowledged and retransmitted if lost
         // - BestEffort: Messages sent once without delivery guarantees (lower latency)
@@ -428,12 +454,13 @@ impl BaseSinkImpl for ZenohSink {
 
         // Create publisher with full configuration
         // Start with the key expression and add QoS parameters
-        let mut publisher_builder = session_wrapper.as_session()
+        let mut publisher_builder = session_wrapper
+            .as_session()
             .declare_publisher(owned)
             .priority(zenoh_priority)
             .congestion_control(zenoh_congestion_control)
             .reliability(zenoh_reliability);
-        
+
         // Express mode: Bypass some internal queues for reduced latency
         // Trade-off: Lower latency vs potentially higher CPU usage
         if express {
@@ -449,17 +476,23 @@ impl BaseSinkImpl for ZenohSink {
 
         // Reacquire state lock to complete transition
         let mut state = self.state.lock().unwrap();
-        
+
         // Verify we're still in Starting state (not stopped during initialization)
         if !matches!(*state, State::Starting) {
-            gst::warning!(CAT, "State changed during startup, aborting start operation");
+            gst::warning!(
+                CAT,
+                "State changed during startup, aborting start operation"
+            );
             return Err(gst::error_msg!(
                 gst::ResourceError::Settings,
                 ["State changed during startup"]
             ));
         }
-        
-        *state = State::Started(Started { session: session_wrapper, publisher });
+
+        *state = State::Started(Started {
+            session: session_wrapper,
+            publisher,
+        });
         gst::debug!(CAT, "ZenohSink successfully transitioned to Started state");
 
         Ok(())
@@ -507,13 +540,13 @@ impl BaseSinkImpl for ZenohSink {
 
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
         let mut state = self.state.lock().unwrap();
-        
+
         // Check if we can stop from current state
         if !state.can_stop() {
             let current_state = match *state {
                 State::Stopped => "Stopped",
                 State::Starting => "Starting",
-                State::Started(_) => "Started", 
+                State::Started(_) => "Started",
                 State::Stopping => "Stopping",
             };
             gst::debug!(CAT, "ZenohSink stop called from state: {}", current_state);
@@ -521,9 +554,13 @@ impl BaseSinkImpl for ZenohSink {
                 return Ok(()); // Already stopped is not an error
             }
             // For Starting state, we should wait or error - for now just warn and continue
-            gst::warning!(CAT, "Stopping ZenohSink from non-started state: {}", current_state);
-        }
-        
+            gst::warning!(
+                CAT,
+                "Stopping ZenohSink from non-started state: {}",
+                current_state
+            );
+}
+
         if let State::Started(ref _started) = *state {
             gst::debug!(CAT, "ZenohSink transitioning from Started to Stopping");
             // Set to Stopping state temporarily
@@ -531,11 +568,11 @@ impl BaseSinkImpl for ZenohSink {
                 State::Started(started) => started,
                 _ => unreachable!(),
             };
-            
+
             // Resources will be cleaned up when _started_data is dropped
             gst::debug!(CAT, "ZenohSink resources cleaned up");
         }
-        
+
         *state = State::Stopped;
         gst::debug!(CAT, "ZenohSink successfully transitioned to Stopped state");
 
@@ -543,7 +580,27 @@ impl BaseSinkImpl for ZenohSink {
     }
 
     fn event(&self, event: gst::Event) -> bool {
-        gst::debug!(CAT, imp = self, "Handling event {:?}", event);
-        self.parent_event(event)
+        use gst::EventView;
+
+        match event.view() {
+            EventView::Eos(_) => {
+                gst::debug!(CAT, imp = self, "End of stream");
+                // Could optionally flush any pending data here
+                self.parent_event(event)
+            }
+            EventView::FlushStart(_) => {
+                gst::debug!(CAT, imp = self, "Flush start");
+                // Could abort any pending publish operations if needed
+                self.parent_event(event)
+            }
+            EventView::FlushStop(_) => {
+                gst::debug!(CAT, imp = self, "Flush stop - ready for new data");
+                self.parent_event(event)
+            }
+            _ => {
+                gst::log!(CAT, imp = self, "Handling event {:?}", event);
+                self.parent_event(event)
+            }
+        }
     }
 }

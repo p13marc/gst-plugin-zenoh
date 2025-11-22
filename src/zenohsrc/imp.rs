@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 use gst::{glib, prelude::*, subclass::prelude::*};
 use gst_base::{
@@ -22,10 +24,12 @@ struct Started {
     session: SessionWrapper,
     subscriber:
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    /// Flag to signal that the element is flushing and should cancel blocking operations
+    flushing: Arc<AtomicBool>,
 }
 
 /// Wrapper to handle both owned and shared Zenoh sessions.
-/// 
+///
 /// This allows the plugin to either create its own session or use
 /// a shared session provided externally, enabling session reuse
 /// across multiple GStreamer elements.
@@ -59,22 +63,22 @@ impl State {
     fn is_started(&self) -> bool {
         matches!(self, State::Started(_))
     }
-    
+
     fn is_stopped(&self) -> bool {
         matches!(self, State::Stopped)
     }
-    
+
     fn can_start(&self) -> bool {
         matches!(self, State::Stopped)
     }
-    
+
     fn can_stop(&self) -> bool {
         matches!(self, State::Started(_))
     }
 }
 
 /// Configuration settings for the ZenohSrc element.
-/// 
+///
 /// These settings control how the element connects to and subscribes
 /// to data from the Zenoh network protocol.
 #[derive(Debug)]
@@ -107,16 +111,17 @@ impl Default for Settings {
 }
 
 /// GStreamer ZenohSrc element implementation.
-/// 
+///
 /// This element subscribes to data from a Zenoh network using the
 /// configured key expression and delivers it as GStreamer buffers
 /// to downstream elements.
-/// 
+///
 /// The element supports:
 /// - Configurable subscription parameters
-/// - Session sharing capabilities  
+/// - Session sharing capabilities
 /// - Automatic reliability adaptation (matches publisher)
 /// - Priority-based message handling
+/// - Proper flush handling and unlock support for responsive state changes
 #[derive(Default)]
 pub struct ZenohSrc {
     /// Element configuration settings
@@ -173,13 +178,13 @@ impl ObjectImpl for ZenohSrc {
                     .nick("Zenoh Key Expression")
                     .blurb("Zenoh key expression for data subscription. Supports wildcards: '*' (single level) and '**' (multi-level). Example: 'demo/video/*', 'sensors/**'")
                     .build(),
-                    
+
                 // Config file property
                 glib::ParamSpecString::builder("config")
                     .nick("Zenoh Configuration")
                     .blurb("Path to Zenoh configuration file for custom network settings (JSON5 format)")
                     .build(),
-                    
+
                 // Priority property
                 glib::ParamSpecUInt::builder("priority")
                     .nick("Subscriber Priority")
@@ -188,14 +193,14 @@ impl ObjectImpl for ZenohSrc {
                     .minimum(1)
                     .maximum(7)
                     .build(),
-                    
+
                 // Congestion control property
                 glib::ParamSpecString::builder("congestion-control")
                     .nick("Congestion Control")
                     .blurb("Congestion control preference (informational): 'block' or 'drop'. Actual behavior depends on publisher settings.")
                     .default_value(Some("block"))
                     .build(),
-                    
+
                 // Reliability property
                 glib::ParamSpecString::builder("reliability")
                     .nick("Reliability Mode")
@@ -211,12 +216,21 @@ impl ObjectImpl for ZenohSrc {
     fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
         // Check if we're in a state where property changes are allowed
         let state = self.state.lock().unwrap();
-        if state.is_started() && matches!(pspec.name(), "key-expr" | "config" | "reliability" | "congestion-control" | "priority") {
-            gst::warning!(CAT, "Cannot change property '{}' while element is started", pspec.name());
+        if state.is_started()
+            && matches!(
+                pspec.name(),
+                "key-expr" | "config" | "reliability" | "congestion-control" | "priority"
+            )
+        {
+            gst::warning!(
+                CAT,
+                "Cannot change property '{}' while element is started",
+                pspec.name()
+            );
             return;
         }
         drop(state);
-        
+
         let mut settings = self.settings.lock().unwrap();
 
         match pspec.name() {
@@ -224,7 +238,9 @@ impl ObjectImpl for ZenohSrc {
                 settings.key_expr = value.get::<String>().expect("type checked upstream");
             }
             "config" => {
-                settings.config_file = value.get::<Option<String>>().expect("type checked upstream");
+                settings.config_file = value
+                    .get::<Option<String>>()
+                    .expect("type checked upstream");
             }
             "priority" => {
                 let priority_val = value.get::<u32>().expect("type checked upstream") as u8;
@@ -232,7 +248,11 @@ impl ObjectImpl for ZenohSrc {
                 if (1..=7).contains(&priority_val) {
                     settings.priority = priority_val;
                 } else {
-                    gst::warning!(CAT, "Invalid priority value '{}', must be 1-7, using default", priority_val);
+                    gst::warning!(
+                        CAT,
+                        "Invalid priority value '{}', must be 1-7, using default",
+                        priority_val
+                    );
                     settings.priority = 5; // Default to Priority::Data
                 }
             }
@@ -306,11 +326,15 @@ impl BaseSrcImpl for ZenohSrc {
         if !state.can_start() {
             let current_state = match *state {
                 State::Stopped => "Stopped",
-                State::Starting => "Starting", 
+                State::Starting => "Starting",
                 State::Started(_) => "Started",
                 State::Stopping => "Stopping",
             };
-            gst::warning!(CAT, "Cannot start ZenohSrc from state: {}, ignoring start request", current_state);
+            gst::warning!(
+                CAT,
+                "Cannot start ZenohSrc from state: {}, ignoring start request",
+                current_state
+            );
             if state.is_started() {
                 return Ok(()); // Already started is not an error
             } else {
@@ -320,7 +344,7 @@ impl BaseSrcImpl for ZenohSrc {
                 ));
             }
         }
-        
+
         gst::debug!(CAT, "ZenohSrc transitioning from Stopped to Starting");
         *state = State::Starting;
         drop(state); // Release state lock before potentially long operations
@@ -334,12 +358,15 @@ impl BaseSrcImpl for ZenohSrc {
         let reliability = settings.reliability.clone();
         let external_session = settings.external_session.clone();
         drop(settings);
-        
+
         // Validate the key expression
         if key_expr.is_empty() {
-            return Err(gst::error_msg!(gst::ResourceError::Settings, ["Key expression is required"]));
+            return Err(gst::error_msg!(
+                gst::ResourceError::Settings,
+                ["Key expression is required"]
+            ));
         }
-        
+
         // Set up Zenoh config with either default or from file
         let config = match config_file {
             Some(path) if !path.is_empty() => {
@@ -349,7 +376,7 @@ impl BaseSrcImpl for ZenohSrc {
             }
             _ => zenoh::Config::default(),
         };
-        
+
         // Use external session if provided, otherwise create a new one
         let session_wrapper = match external_session {
             Some(shared_session) => {
@@ -364,53 +391,59 @@ impl BaseSrcImpl for ZenohSrc {
                 SessionWrapper::Owned(session)
             }
         };
-            
-        gst::debug!(CAT, "Creating subscriber with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'", 
+
+        gst::debug!(CAT, "Creating subscriber with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'",
                   key_expr, priority, congestion_control, reliability);
-        
+
         // Note: Zenoh subscriber reliability is automatically determined by the publisher
-        // 
+        //
         // Unlike publishers, subscribers don't explicitly configure reliability modes.
         // Instead, they automatically adapt to match the reliability mode of the
         // publisher they're receiving from. This ensures consistent delivery guarantees
         // across the pub-sub connection without requiring manual coordination.
-                  
+
         // Create subscriber
-        let subscriber = session_wrapper.as_session()
+        let subscriber = session_wrapper
+            .as_session()
             .declare_subscriber(key_expr)
             .wait()
             .map_err(|e| ZenohError::InitError(e).to_error_message())?;
 
         // Reacquire state lock to complete transition
         let mut state = self.state.lock().unwrap();
-        
+
         // Verify we're still in Starting state (not stopped during initialization)
         if !matches!(*state, State::Starting) {
-            gst::warning!(CAT, "State changed during startup, aborting start operation");
+            gst::warning!(
+                CAT,
+                "State changed during startup, aborting start operation"
+            );
             return Err(gst::error_msg!(
                 gst::ResourceError::Settings,
                 ["State changed during startup"]
             ));
         }
-        
+
         *state = State::Started(Started {
             session: session_wrapper,
             subscriber,
+            flushing: Arc::new(AtomicBool::new(false)),
         });
-        
+
         gst::debug!(CAT, "ZenohSrc successfully transitioned to Started state");
 
         Ok(())
     }
+
     fn stop(&self) -> Result<(), gst::ErrorMessage> {
         let mut state = self.state.lock().unwrap();
-        
+
         // Check if we can stop from current state
         if !state.can_stop() {
             let current_state = match *state {
                 State::Stopped => "Stopped",
                 State::Starting => "Starting",
-                State::Started(_) => "Started", 
+                State::Started(_) => "Started",
                 State::Stopping => "Stopping",
             };
             gst::debug!(CAT, "ZenohSrc stop called from state: {}", current_state);
@@ -418,9 +451,13 @@ impl BaseSrcImpl for ZenohSrc {
                 return Ok(()); // Already stopped is not an error
             }
             // For Starting state, we should wait or error - for now just warn and continue
-            gst::warning!(CAT, "Stopping ZenohSrc from non-started state: {}", current_state);
+            gst::warning!(
+                CAT,
+                "Stopping ZenohSrc from non-started state: {}",
+                current_state
+            );
         }
-        
+
         if let State::Started(ref _started) = *state {
             gst::debug!(CAT, "ZenohSrc transitioning from Started to Stopping");
             // Set to Stopping state temporarily
@@ -428,15 +465,65 @@ impl BaseSrcImpl for ZenohSrc {
                 State::Started(started) => started,
                 _ => unreachable!(),
             };
-            
+
             // Resources will be cleaned up when _started_data is dropped
             gst::debug!(CAT, "ZenohSrc resources cleaned up");
         }
-        
+
         *state = State::Stopped;
         gst::debug!(CAT, "ZenohSrc successfully transitioned to Stopped state");
 
         Ok(())
+    }
+
+    fn unlock(&self) -> Result<(), gst::ErrorMessage> {
+        gst::debug!(
+            CAT,
+            imp = self,
+            "Unlock called - cancelling blocking operations"
+        );
+        let state = self.state.lock().unwrap();
+        if let State::Started(ref started) = *state {
+            started.flushing.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    fn unlock_stop(&self) -> Result<(), gst::ErrorMessage> {
+        gst::debug!(
+            CAT,
+            imp = self,
+            "Unlock stop called - resuming normal operation"
+        );
+        let state = self.state.lock().unwrap();
+        if let State::Started(ref started) = *state {
+            started.flushing.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    fn event(&self, event: &gst::Event) -> bool {
+        use gst::EventView;
+
+        match event.view() {
+            EventView::FlushStart(_) => {
+                gst::debug!(CAT, imp = self, "Flush start - cancelling operations");
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.flushing.store(true, Ordering::SeqCst);
+                }
+                self.parent_event(event)
+            }
+            EventView::FlushStop(_) => {
+                gst::debug!(CAT, imp = self, "Flush stop - resuming operations");
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.flushing.store(false, Ordering::SeqCst);
+                }
+                self.parent_event(event)
+            }
+            _ => self.parent_event(event),
+        }
     }
 }
 
@@ -451,38 +538,76 @@ impl PushSrcImpl for ZenohSrc {
             return Err(gst::FlowError::Error);
         };
 
-        // Use Zenoh's synchronous API with proper error handling
-        let sample = started.subscriber.recv()
-            .map_err(|e| {
-                let err = ZenohError::ReceiveError(e.to_string());
-                // Check if this is a network-related error
-                let error_msg = e.to_string();
-                if error_msg.contains("timeout") || error_msg.contains("connection") || error_msg.contains("network") {
-                    gst::element_imp_error!(self, gst::ResourceError::Read, 
-                        ["Network error while receiving: {}", err]);
-                } else {
-                    gst::element_imp_error!(self, gst::ResourceError::Read, ["{}", err]);
+        // Check if we're flushing before attempting to receive
+        if started.flushing.load(Ordering::SeqCst) {
+            gst::debug!(CAT, imp = self, "Flushing - returning Flushing flow");
+            return Err(gst::FlowError::Flushing);
+        }
+
+        // CRITICAL: Use recv_timeout() instead of blocking recv()
+        // This allows us to check the flushing flag periodically without sleeping
+        let sample: zenoh::sample::Sample = loop {
+            if started.flushing.load(Ordering::SeqCst) {
+                gst::debug!(CAT, imp = self, "Flushing detected during receive");
+                return Err(gst::FlowError::Flushing);
+            }
+
+            // Use recv_timeout with short timeout to remain responsive to flushing
+            // recv_timeout returns Result<Option<Sample>, RecvTimeoutError>
+            match started.subscriber.recv_timeout(Duration::from_millis(100)) {
+                Ok(Some(sample)) => break sample,
+                Ok(None) => {
+                    // No sample available, continue loop
+                    continue;
                 }
-                err.to_flow_error()
-            })?;
-        
+                Err(e) => {
+                    // Check if it's a timeout or disconnection
+                    let err_msg = format!("{:?}", e);
+                    if err_msg.contains("Timeout") {
+                        // Timeout - check flushing flag and retry
+                        continue;
+                    } else {
+                        // Disconnected or other error
+                        gst::element_imp_error!(
+                            self,
+                            gst::ResourceError::Read,
+                            ["Subscriber error: {}", e]
+                        );
+                        return Err(gst::FlowError::Error);
+                    }
+                }
+            }
+        };
+
         let payload = sample.payload();
         let slice = payload.to_bytes();
 
-        let mut buffer = gst::Buffer::with_size(slice.len())
-            .map_err(|_| {
-                gst::element_imp_error!(self, gst::ResourceError::Failed, ["Failed to allocate buffer"]);
-                gst::FlowError::Error
-            })?;
-            
-        buffer.get_mut()
+        let mut buffer = gst::Buffer::with_size(slice.len()).map_err(|_| {
+            gst::element_imp_error!(
+                self,
+                gst::ResourceError::Failed,
+                ["Failed to allocate buffer"]
+            );
+            gst::FlowError::Error
+        })?;
+
+        buffer
+            .get_mut()
             .ok_or_else(|| {
-                gst::element_imp_error!(self, gst::ResourceError::Failed, ["Failed to get mutable buffer reference"]);
+                gst::element_imp_error!(
+                    self,
+                    gst::ResourceError::Failed,
+                    ["Failed to get mutable buffer reference"]
+                );
                 gst::FlowError::Error
             })?
             .copy_from_slice(0, &slice)
             .map_err(|_| {
-                gst::element_imp_error!(self, gst::ResourceError::Failed, ["Failed to copy data to buffer"]);
+                gst::element_imp_error!(
+                    self,
+                    gst::ResourceError::Failed,
+                    ["Failed to copy data to buffer"]
+                );
                 gst::FlowError::Error
             })?;
 
