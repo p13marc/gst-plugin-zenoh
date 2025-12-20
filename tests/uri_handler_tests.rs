@@ -414,3 +414,105 @@ fn test_uri_unknown_parameters_warning() {
     let priority: u32 = sink.property("priority");
     assert_eq!(priority, 2);
 }
+
+#[test]
+#[serial]
+fn test_zenohsrc_receive_timeout_property() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    // Check default value
+    let timeout: u64 = src.property("receive-timeout-ms");
+    assert_eq!(timeout, 100, "Default receive-timeout-ms should be 100");
+
+    // Set a custom value within valid range
+    src.set_property("receive-timeout-ms", 250u64);
+    let timeout: u64 = src.property("receive-timeout-ms");
+    assert_eq!(timeout, 250);
+
+    // Test minimum valid value
+    src.set_property("receive-timeout-ms", 10u64);
+    let timeout: u64 = src.property("receive-timeout-ms");
+    assert_eq!(timeout, 10, "Should accept minimum of 10ms");
+
+    // Test maximum valid value
+    src.set_property("receive-timeout-ms", 5000u64);
+    let timeout: u64 = src.property("receive-timeout-ms");
+    assert_eq!(timeout, 5000, "Should accept maximum of 5000ms");
+
+    // Test various values in range
+    src.set_property("receive-timeout-ms", 1000u64);
+    let timeout: u64 = src.property("receive-timeout-ms");
+    assert_eq!(timeout, 1000);
+}
+
+#[test]
+#[serial]
+fn test_zenohsrc_receive_timeout_in_uri() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    let uri_handler = src.dynamic_cast_ref::<gst::URIHandler>().unwrap();
+
+    // Set URI with receive-timeout-ms parameter
+    uri_handler
+        .set_uri("zenoh:demo/video?receive-timeout-ms=500")
+        .unwrap();
+
+    let key_expr: String = src.property("key-expr");
+    let timeout: u64 = src.property("receive-timeout-ms");
+
+    assert_eq!(key_expr, "demo/video");
+    assert_eq!(timeout, 500);
+}
+
+#[test]
+#[serial]
+fn test_zenohsrc_receive_timeout_uri_roundtrip() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    // Set properties including non-default receive-timeout-ms
+    src.set_property("key-expr", "demo/video");
+    src.set_property("receive-timeout-ms", 250u64);
+
+    let uri_handler = src.dynamic_cast_ref::<gst::URIHandler>().unwrap();
+
+    // Get URI - should include receive-timeout-ms since it's non-default
+    let uri = uri_handler.uri().unwrap();
+
+    assert!(uri.contains("demo/video"));
+    assert!(
+        uri.contains("receive-timeout-ms=250"),
+        "URI should contain non-default receive-timeout-ms"
+    );
+}
+
+#[test]
+#[serial]
+fn test_zenohsrc_receive_timeout_invalid_uri() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    let uri_handler = src.dynamic_cast_ref::<gst::URIHandler>().unwrap();
+
+    // Try to set URI with invalid receive-timeout-ms value
+    let result = uri_handler.set_uri("zenoh:demo/video?receive-timeout-ms=invalid");
+
+    assert!(
+        result.is_err(),
+        "Should reject invalid receive-timeout-ms value"
+    );
+}

@@ -107,6 +107,9 @@ struct Settings {
     congestion_control: String,
     /// Reliability mode: "best-effort" or "reliable" (matches publisher settings)
     reliability: String,
+    /// Receive timeout in milliseconds for polling Zenoh subscriber
+    /// Affects CPU usage vs responsiveness tradeoff (lower = more responsive but higher CPU)
+    receive_timeout_ms: u64,
     /// Optional external Zenoh session to share with other elements
     external_session: Option<Arc<zenoh::Session>>,
 }
@@ -119,6 +122,7 @@ impl Default for Settings {
             priority: 5, // Default to Priority::Data
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
+            receive_timeout_ms: 100, // 100ms default for good responsiveness
             external_session: None,
         }
     }
@@ -221,6 +225,16 @@ impl ObjectImpl for ZenohSrc {
                     .blurb("Expected reliability mode (informational): 'best-effort' or 'reliable'. Actual reliability is determined by publisher.")
                     .default_value(Some("best-effort"))
                     .build(),
+
+                // Receive timeout property
+                glib::ParamSpecUInt64::builder("receive-timeout-ms")
+                    .nick("Receive Timeout")
+                    .blurb("Timeout in milliseconds for polling Zenoh subscriber. Lower values increase responsiveness but use more CPU. Higher values reduce CPU but slow down state changes.")
+                    .default_value(100)
+                    .minimum(10)
+                    .maximum(5000)
+                    .build(),
+
                 // Statistics properties (read-only)
                 glib::ParamSpecUInt64::builder("bytes-received")
                     .nick("Bytes Received")
@@ -310,6 +324,19 @@ impl ObjectImpl for ZenohSrc {
                     ),
                 }
             }
+            "receive-timeout-ms" => {
+                let timeout = value.get::<u64>().expect("type checked upstream");
+                // Clamp to valid range (10-5000ms)
+                settings.receive_timeout_ms = timeout.clamp(10, 5000);
+                if timeout != settings.receive_timeout_ms {
+                    gst::warning!(
+                        CAT,
+                        "Receive timeout clamped to {}ms (was {}ms)",
+                        settings.receive_timeout_ms,
+                        timeout
+                    );
+                }
+            }
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
             }
@@ -319,7 +346,8 @@ impl ObjectImpl for ZenohSrc {
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
         match pspec.name() {
             // Configuration properties - read from settings
-            "key-expr" | "config" | "priority" | "congestion-control" | "reliability" => {
+            "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
+            | "receive-timeout-ms" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
@@ -327,6 +355,7 @@ impl ObjectImpl for ZenohSrc {
                     "priority" => (settings.priority as u32).to_value(),
                     "congestion-control" => settings.congestion_control.to_value(),
                     "reliability" => settings.reliability.to_value(),
+                    "receive-timeout-ms" => settings.receive_timeout_ms.to_value(),
                     _ => unreachable!(),
                 }
             }
@@ -642,6 +671,9 @@ impl PushSrcImpl for ZenohSrc {
             return Err(gst::FlowError::Flushing);
         }
 
+        // Get the configured receive timeout
+        let receive_timeout_ms = self.settings.lock().unwrap().receive_timeout_ms;
+
         // CRITICAL: Use recv_timeout() instead of blocking recv()
         // This allows us to check the flushing flag periodically without sleeping
         let sample: zenoh::sample::Sample = loop {
@@ -650,9 +682,12 @@ impl PushSrcImpl for ZenohSrc {
                 return Err(gst::FlowError::Flushing);
             }
 
-            // Use recv_timeout with short timeout to remain responsive to flushing
+            // Use recv_timeout with configurable timeout to remain responsive to flushing
             // recv_timeout returns Result<Option<Sample>, RecvTimeoutError>
-            match started.subscriber.recv_timeout(Duration::from_millis(100)) {
+            match started
+                .subscriber
+                .recv_timeout(Duration::from_millis(receive_timeout_ms))
+            {
                 Ok(Some(sample)) => break sample,
                 Ok(None) => {
                     // No sample available, continue loop
@@ -907,6 +942,12 @@ impl URIHandlerImpl for ZenohSrc {
         if settings.reliability != "best-effort" {
             params.push(format!("reliability={}", settings.reliability));
         }
+        if settings.receive_timeout_ms != 100 {
+            params.push(format!(
+                "receive-timeout-ms={}",
+                settings.receive_timeout_ms
+            ));
+        }
 
         if !params.is_empty() {
             uri.push('?');
@@ -1008,6 +1049,16 @@ impl URIHandlerImpl for ZenohSrc {
                                 ));
                             }
                             settings.reliability = value;
+                        }
+                        "receive-timeout-ms" => {
+                            let timeout: u64 = value.parse().map_err(|_| {
+                                glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!("Invalid receive-timeout-ms value: {}", value),
+                                )
+                            })?;
+                            // Clamp to valid range
+                            settings.receive_timeout_ms = timeout.clamp(10, 5000);
                         }
                         _ => {
                             gst::warning!(CAT, imp = self, "Unknown URI parameter: {}", key);
