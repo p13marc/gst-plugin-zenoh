@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A GStreamer plugin that enables distributed media streaming using Zenoh as the transport layer. Provides two elements:
+A GStreamer plugin that enables distributed media streaming using Zenoh as the transport layer. Provides three elements:
 - **zenohsink**: Publishes GStreamer buffers to Zenoh networks
 - **zenohsrc**: Subscribes to Zenoh data and delivers it to GStreamer pipelines
+- **zenohdemux**: Demultiplexes Zenoh streams by key expression, creating dynamic pads for each unique key
 
 ## Build Commands
 
@@ -43,27 +44,36 @@ src/
 ├── lib.rs              # Plugin registration entry point
 ├── utils.rs            # Shared utilities
 ├── error.rs            # ZenohError type with thiserror
-├── metadata.rs         # Caps/metadata transmission helpers
+├── metadata.rs         # Caps/metadata transmission helpers (includes buffer timing)
 ├── compression.rs      # Optional compression (zstd/lz4/gzip)
 ├── zenohsink/
 │   ├── mod.rs          # Element registration
 │   └── imp.rs          # BaseSink implementation
-└── zenohsrc/
+├── zenohsrc/
+│   ├── mod.rs          # Element registration
+│   └── imp.rs          # PushSrc implementation
+└── zenohdemux/
     ├── mod.rs          # Element registration
-    └── imp.rs          # PushSrc implementation
+    └── imp.rs          # Element implementation with dynamic pads
 ```
 
 ### Key Implementation Details
 
 - **ZenohSink** (`zenohsink/imp.rs`): Extends `gst_base::BaseSink`. On `start()`, creates a Zenoh session and publisher. The `render()` method maps GStreamer buffers and publishes via `publisher.put().wait()`.
 
-- **ZenohSrc** (`zenohsrc/imp.rs`): Extends `gst_base::PushSrc`. On `start()`, creates a Zenoh session and subscriber with FIFO handler. The `create()` method calls `subscriber.recv()` (blocking) to get samples.
+- **ZenohSrc** (`zenohsrc/imp.rs`): Extends `gst_base::PushSrc`. On `start()`, creates a Zenoh session and subscriber with FIFO handler. The `create()` method uses `subscriber.recv_timeout()` (configurable via `receive-timeout-ms`) to get samples. Supports buffer metadata restoration via `apply-buffer-meta` property.
+
+- **ZenohDemux** (`zenohdemux/imp.rs`): Extends `gst::Element`. Creates dynamic source pads based on incoming key expressions. Uses a receiver thread for Zenoh subscription. Supports three pad naming strategies: `full-path`, `last-segment`, and `hash`. Attaches key expression as buffer metadata.
 
 - **Synchronous API**: Uses Zenoh's `.wait()` for synchronous operations. No Tokio runtime.
 
 - **State Management**: Simple `Stopped`/`Started(resources)` enum. Resources cleaned up via `Drop`.
 
 - **Caps Transmission**: First buffer sends GStreamer caps as Zenoh attachment metadata (controlled by `send-caps` property).
+
+- **Buffer Metadata**: PTS, DTS, duration, offset, and flags can be transmitted via Zenoh attachments (`send-buffer-meta` on sink, `apply-buffer-meta` on src/demux). Uses `metadata.rs` with versioned format (v1.0).
+
+- **Zero-Copy Optimization**: When compression is disabled, `render()` uses `Cow::Borrowed` to avoid copying buffer data.
 
 ## Feature Flags
 
@@ -79,11 +89,12 @@ src/
 Tests use `serial_test` for isolation since GStreamer plugin registration is global:
 
 ```bash
-cargo test                              # All tests
+cargo test                              # All tests (101 tests)
 cargo test --test plugin_tests          # Element creation, properties
 cargo test --test integration_tests     # Pipeline integration
-cargo test --test uri_handler_tests     # URI parsing
+cargo test --test uri_handler_tests     # URI parsing, buffer metadata properties
 cargo test --test statistics_tests      # Stats properties
+cargo test --test zenohdemux_tests      # Demux element tests
 ```
 
 ## Common Development Tasks
@@ -123,8 +134,17 @@ ZenohSink additional:
 - `caps-interval` (int): Seconds between caps retransmission
 - `compression`: `none`, `zstd`, `lz4`, `gzip`
 - `compression-level` (1-9): Compression level
+- `send-buffer-meta` (bool): Send buffer timing metadata (PTS, DTS, duration, flags)
 
-Statistics (read-only): `bytes-sent`, `messages-sent`, `errors`, `dropped`
+ZenohSrc additional:
+- `receive-timeout-ms` (int): Timeout for receiving samples (default: 1000)
+- `apply-buffer-meta` (bool): Apply buffer timing from Zenoh attachments
+
+ZenohDemux additional:
+- `pad-naming`: `full-path`, `last-segment`, or `hash`
+- `apply-buffer-meta` (bool): Apply buffer timing from Zenoh attachments
+
+Statistics (read-only): `bytes-sent`/`bytes-received`, `messages-sent`/`messages-received`, `errors`, `dropped`, `pads-created` (demux only)
 
 ## Dependencies
 

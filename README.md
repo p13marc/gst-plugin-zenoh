@@ -9,10 +9,11 @@ A high-performance [GStreamer](https://gstreamer.freedesktop.org/) plugin that e
 
 ## Overview
 
-The plugin provides two complementary GStreamer elements that bridge GStreamer pipelines with Zenoh networks:
+The plugin provides three GStreamer elements that bridge GStreamer pipelines with Zenoh networks:
 
 - **`zenohsink`**: Publishes GStreamer buffers to Zenoh networks
 - **`zenohsrc`**: Subscribes to Zenoh data and delivers it to GStreamer pipelines
+- **`zenohdemux`**: Demultiplexes Zenoh streams by key expression, creating dynamic pads for each unique key
 
 Together, these elements enable distributed media applications, edge computing scenarios, robotics systems, IoT data streaming, and more.
 
@@ -28,8 +29,9 @@ Together, these elements enable distributed media applications, edge computing s
 - **Session Sharing**: Efficient resource usage through shared Zenoh sessions
 - **Batch Rendering**: Efficient buffer list processing for high-throughput scenarios
 - **Responsive State Changes**: Sub-second response to pipeline state changes with proper unlock/flush support
-- **Optimized Data Paths**: Minimal overhead with efficient memory handling
+- **Zero-Copy Data Paths**: Minimal overhead with Cow-based buffer handling when compression is disabled
 - **Optional Compression**: Reduce bandwidth usage with Zstandard, LZ4, or Gzip compression (compile-time optional)
+- **Buffer Metadata Preservation**: PTS, DTS, duration, and flags preserved across Zenoh transport for proper A/V sync
 
 ### Flexible Configuration
 - **URI Handler Support**: Configure elements using standard GStreamer URI syntax (e.g., `zenoh:demo/video?priority=2&reliability=reliable`)
@@ -53,7 +55,7 @@ Together, these elements enable distributed media applications, edge computing s
 - **Comprehensive Error Handling**: 10 specific error types with helpful diagnostics
 - **Thread Safety**: Safe concurrent access to all plugin components
 - **Property Locking**: Runtime protection against invalid configuration changes
-- **Extensive Testing**: 71 comprehensive tests ensuring reliability
+- **Extensive Testing**: 101 comprehensive tests ensuring reliability
 
 ## Quick Start
 
@@ -401,6 +403,7 @@ if let Some(uri_handler) = sink.dynamic_cast_ref::<gst::URIHandler>() {
 | `caps-interval` | Integer | `1` | Interval in seconds to send caps periodically (0 = only first buffer and format changes) |
 | `compression` | Enum | `none` | Compression algorithm: `none`, `zstd`, `lz4`, or `gzip` (requires compilation with compression features) |
 | `compression-level` | Integer | `5` | Compression level (1=fastest/largest, 9=slowest/smallest, 5=balanced) |
+| `send-buffer-meta` | Boolean | `true` | Send buffer metadata (PTS, DTS, duration, flags) as Zenoh attachments. Enables proper A/V synchronization on receiver. |
 
 #### Usage Examples:
 ```bash
@@ -439,6 +442,8 @@ zenohsink key-expr=compressed/video compression=gzip compression-level=6
 || `priority` | Integer | `5` | Subscriber priority (1-7). Lower values = higher priority. 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background |
 | `congestion-control` | String | `"block"` | Informational only - actual behavior determined by publisher |
 | `reliability` | String | `"best-effort"` | Expected reliability mode - actual mode matches publisher |
+| `receive-timeout-ms` | Integer | `1000` | Timeout in milliseconds for receiving samples. Controls how long `create()` waits for data before checking for shutdown signals. |
+| `apply-buffer-meta` | Boolean | `true` | Apply buffer metadata (PTS, DTS, duration, flags) from Zenoh attachments. Enables proper A/V synchronization. |
 
 #### Wildcard Examples:
 ```bash
@@ -450,6 +455,40 @@ zenohsrc key-expr="sensors/**"
 
 # Subscribe to specific data types across all devices
 zenohsrc key-expr="**/temperature"
+```
+
+### ZenohDemux Properties
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `key-expr` | String | *required* | Zenoh key expression for subscription (supports wildcards: `*`, `**`) |
+| `config` | String | `null` | Path to Zenoh configuration file |
+| `priority` | Integer | `5` | Subscriber priority (1-7). Lower values = higher priority. |
+| `reliability` | String | `"best-effort"` | Expected reliability mode - actual mode matches publisher |
+| `pad-naming` | Enum | `full-path` | Pad naming strategy: `full-path` (use full key expression), `last-segment` (use last path segment), `hash` (use hash of key expression) |
+| `apply-buffer-meta` | Boolean | `true` | Apply buffer metadata (PTS, DTS, duration, flags) from Zenoh attachments |
+
+#### Statistics (read-only):
+| Property | Type | Description |
+|----------|------|-------------|
+| `bytes-received` | UInt64 | Total bytes received from Zenoh network |
+| `messages-received` | UInt64 | Total number of buffers received |
+| `errors` | UInt64 | Number of receive errors encountered |
+| `pads-created` | UInt64 | Number of dynamic source pads created |
+
+#### ZenohDemux Examples:
+```bash
+# Demultiplex all sensor streams - creates one pad per unique key expression
+gst-launch-1.0 zenohdemux key-expr="sensors/**" name=demux \
+  demux. ! queue ! filesink location=sensor1.dat
+
+# Use last segment for pad naming (e.g., "temperature" instead of "sensors/device1/temperature")
+gst-launch-1.0 zenohdemux key-expr="sensors/**" pad-naming=last-segment name=demux \
+  demux. ! queue ! fakesink
+
+# Multi-camera demultiplexing with hash-based pad naming
+gst-launch-1.0 zenohdemux key-expr="cameras/**" pad-naming=hash name=demux \
+  demux. ! queue ! videoconvert ! autovideosink
 ```
 
 ### Quality of Service (QoS) Guidelines
