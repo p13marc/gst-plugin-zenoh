@@ -130,6 +130,8 @@ struct Settings {
     send_caps: bool,
     /// Interval in seconds to send caps periodically (0 = only on first buffer and changes, default: 1)
     caps_interval: u32,
+    /// Send buffer timing metadata (PTS, DTS, duration, flags) with each buffer (default: true)
+    send_buffer_meta: bool,
     /// Compression algorithm to use (requires compression features)
     #[cfg(any(
         feature = "compression-zstd",
@@ -157,8 +159,9 @@ impl Default for Settings {
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
             express: false,
-            send_caps: true,  // Default to sending caps for ease of use
-            caps_interval: 1, // Send caps every 1 second by default
+            send_caps: true,        // Default to sending caps for ease of use
+            caps_interval: 1,       // Send caps every 1 second by default
+            send_buffer_meta: true, // Default to sending buffer timing metadata
             #[cfg(any(
                 feature = "compression-zstd",
                 feature = "compression-lz4",
@@ -304,6 +307,12 @@ impl ObjectImpl for ZenohSink {
                     .default_value(1)
                     .minimum(0)
                     .maximum(3600)
+                    .build(),
+                // Buffer metadata property
+                glib::ParamSpecBoolean::builder("send-buffer-meta")
+                    .nick("Send Buffer Metadata")
+                    .blurb("Send buffer timing metadata (PTS, DTS, duration, offset, flags) with each buffer for proper A/V sync")
+                    .default_value(true)
                     .build(),
                 // Compression properties (conditional on features)
                 #[cfg(any(
@@ -468,6 +477,9 @@ impl ObjectImpl for ZenohSink {
             "caps-interval" => {
                 settings.caps_interval = value.get::<u32>().expect("type checked upstream");
             }
+            "send-buffer-meta" => {
+                settings.send_buffer_meta = value.get::<bool>().expect("type checked upstream");
+            }
             #[cfg(any(
                 feature = "compression-zstd",
                 feature = "compression-lz4",
@@ -506,7 +518,7 @@ impl ObjectImpl for ZenohSink {
         match pspec.name() {
             // Configuration properties - read from settings
             "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
-            | "express" | "send-caps" | "caps-interval" => {
+            | "express" | "send-caps" | "caps-interval" | "send-buffer-meta" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
@@ -517,6 +529,7 @@ impl ObjectImpl for ZenohSink {
                     "express" => settings.express.to_value(),
                     "send-caps" => settings.send_caps.to_value(),
                     "caps-interval" => settings.caps_interval.to_value(),
+                    "send-buffer-meta" => settings.send_buffer_meta.to_value(),
                     _ => unreachable!(),
                 }
             }
@@ -887,9 +900,13 @@ impl BaseSinkImpl for ZenohSink {
         let (data_to_send, compressed) = (b.as_slice().to_vec(), false);
 
         // Smart caps transmission: send caps when needed, not on every buffer
-        let (send_caps, caps_interval) = {
+        let (send_caps, caps_interval, send_buffer_meta) = {
             let settings = self.settings.lock().unwrap();
-            (settings.send_caps, settings.caps_interval)
+            (
+                settings.send_caps,
+                settings.caps_interval,
+                settings.send_buffer_meta,
+            )
         };
 
         let attachment = if send_caps {
@@ -938,19 +955,12 @@ impl BaseSinkImpl for ZenohSink {
                 }
 
                 if should_send {
-                    #[cfg(any(
-                        feature = "compression-zstd",
-                        feature = "compression-lz4",
-                        feature = "compression-gzip"
-                    ))]
                     let mut metadata_builder = MetadataBuilder::new().caps(&caps);
 
-                    #[cfg(not(any(
-                        feature = "compression-zstd",
-                        feature = "compression-lz4",
-                        feature = "compression-gzip"
-                    )))]
-                    let metadata_builder = MetadataBuilder::new().caps(&caps);
+                    // Add buffer timing metadata if enabled
+                    if send_buffer_meta {
+                        metadata_builder = metadata_builder.buffer_timing(buffer);
+                    }
 
                     // Add compression metadata if compressed
                     #[cfg(any(
@@ -966,35 +976,89 @@ impl BaseSinkImpl for ZenohSink {
                     }
 
                     metadata_builder.build()
-                } else if compressed {
-                    // Even if not sending caps, we need to send compression metadata
+                } else {
+                    // Not sending caps, but may still need buffer timing or compression metadata
+                    let needs_metadata = send_buffer_meta || compressed;
+
+                    if needs_metadata {
+                        let mut metadata_builder = MetadataBuilder::new();
+
+                        if send_buffer_meta {
+                            metadata_builder = metadata_builder.buffer_timing(buffer);
+                        }
+
+                        #[cfg(any(
+                            feature = "compression-zstd",
+                            feature = "compression-lz4",
+                            feature = "compression-gzip"
+                        ))]
+                        if compressed {
+                            metadata_builder = metadata_builder.user_metadata(
+                                crate::metadata::keys::COMPRESSION,
+                                compression_type.to_metadata_value(),
+                            );
+                        }
+
+                        metadata_builder.build()
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                // No caps available, but may still need buffer timing or compression metadata
+                let needs_metadata = send_buffer_meta || compressed;
+
+                if needs_metadata {
+                    let mut metadata_builder = MetadataBuilder::new();
+
+                    if send_buffer_meta {
+                        metadata_builder = metadata_builder.buffer_timing(buffer);
+                    }
+
                     #[cfg(any(
                         feature = "compression-zstd",
                         feature = "compression-lz4",
                         feature = "compression-gzip"
                     ))]
-                    {
-                        MetadataBuilder::new()
-                            .user_metadata(
-                                crate::metadata::keys::COMPRESSION,
-                                compression_type.to_metadata_value(),
-                            )
-                            .build()
+                    if compressed {
+                        metadata_builder = metadata_builder.user_metadata(
+                            crate::metadata::keys::COMPRESSION,
+                            compression_type.to_metadata_value(),
+                        );
                     }
-                    #[cfg(not(any(
-                        feature = "compression-zstd",
-                        feature = "compression-lz4",
-                        feature = "compression-gzip"
-                    )))]
-                    None
+
+                    metadata_builder.build()
                 } else {
                     None
                 }
+            }
+        } else {
+            // send_caps is false, but may still need buffer timing or compression metadata
+            let needs_metadata = send_buffer_meta || compressed;
+
+            if needs_metadata {
+                let mut metadata_builder = MetadataBuilder::new();
+
+                if send_buffer_meta {
+                    metadata_builder = metadata_builder.buffer_timing(buffer);
+                }
+
+                #[cfg(any(
+                    feature = "compression-zstd",
+                    feature = "compression-lz4",
+                    feature = "compression-gzip"
+                ))]
+                if compressed {
+                    metadata_builder = metadata_builder.user_metadata(
+                        crate::metadata::keys::COMPRESSION,
+                        compression_type.to_metadata_value(),
+                    );
+                }
+
+                metadata_builder.build()
             } else {
                 None
             }
-        } else {
-            None
         };
 
         // Send with caps attachment

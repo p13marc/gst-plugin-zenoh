@@ -110,6 +110,8 @@ struct Settings {
     /// Receive timeout in milliseconds for polling Zenoh subscriber
     /// Affects CPU usage vs responsiveness tradeoff (lower = more responsive but higher CPU)
     receive_timeout_ms: u64,
+    /// Apply buffer timing metadata (PTS, DTS, duration, flags) from received messages (default: true)
+    apply_buffer_meta: bool,
     /// Optional external Zenoh session to share with other elements
     external_session: Option<Arc<zenoh::Session>>,
 }
@@ -123,6 +125,7 @@ impl Default for Settings {
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
             receive_timeout_ms: 100, // 100ms default for good responsiveness
+            apply_buffer_meta: true, // Default to applying buffer timing metadata
             external_session: None,
         }
     }
@@ -235,6 +238,13 @@ impl ObjectImpl for ZenohSrc {
                     .maximum(5000)
                     .build(),
 
+                // Buffer metadata property
+                glib::ParamSpecBoolean::builder("apply-buffer-meta")
+                    .nick("Apply Buffer Metadata")
+                    .blurb("Apply buffer timing metadata (PTS, DTS, duration, offset, flags) from received messages for proper A/V sync")
+                    .default_value(true)
+                    .build(),
+
                 // Statistics properties (read-only)
                 glib::ParamSpecUInt64::builder("bytes-received")
                     .nick("Bytes Received")
@@ -337,6 +347,9 @@ impl ObjectImpl for ZenohSrc {
                     );
                 }
             }
+            "apply-buffer-meta" => {
+                settings.apply_buffer_meta = value.get::<bool>().expect("type checked upstream");
+            }
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
             }
@@ -347,7 +360,7 @@ impl ObjectImpl for ZenohSrc {
         match pspec.name() {
             // Configuration properties - read from settings
             "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
-            | "receive-timeout-ms" => {
+            | "receive-timeout-ms" | "apply-buffer-meta" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
@@ -356,6 +369,7 @@ impl ObjectImpl for ZenohSrc {
                     "congestion-control" => settings.congestion_control.to_value(),
                     "reliability" => settings.reliability.to_value(),
                     "receive-timeout-ms" => settings.receive_timeout_ms.to_value(),
+                    "apply-buffer-meta" => settings.apply_buffer_meta.to_value(),
                     _ => unreachable!(),
                 }
             }
@@ -671,8 +685,11 @@ impl PushSrcImpl for ZenohSrc {
             return Err(gst::FlowError::Flushing);
         }
 
-        // Get the configured receive timeout
-        let receive_timeout_ms = self.settings.lock().unwrap().receive_timeout_ms;
+        // Get the configured settings
+        let (receive_timeout_ms, apply_buffer_meta) = {
+            let settings = self.settings.lock().unwrap();
+            (settings.receive_timeout_ms, settings.apply_buffer_meta)
+        };
 
         // CRITICAL: Use recv_timeout() instead of blocking recv()
         // This allows us to check the flushing flag periodically without sleeping
@@ -713,13 +730,14 @@ impl PushSrcImpl for ZenohSrc {
             }
         };
 
-        // Check if the sample has attachment metadata (caps, custom metadata, etc.)
+        // Check if the sample has attachment metadata (caps, buffer timing, compression, etc.)
+        // Parse metadata once and extract all relevant information
         #[cfg(any(
             feature = "compression-zstd",
             feature = "compression-lz4",
             feature = "compression-gzip"
         ))]
-        let compression_type = if let Some(attachment) = sample.attachment() {
+        let (parsed_metadata, compression_type) = if let Some(attachment) = sample.attachment() {
             match MetadataParser::parse(attachment) {
                 Ok(metadata) => {
                     // If caps are present in metadata, set them on the source pad
@@ -748,15 +766,15 @@ impl PushSrcImpl for ZenohSrc {
                         );
                     }
 
-                    compression
+                    (Some(metadata), compression)
                 }
                 Err(e) => {
                     gst::warning!(CAT, imp = self, "Failed to parse metadata: {}", e);
-                    None
+                    (None, None)
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
         #[cfg(not(any(
@@ -764,7 +782,7 @@ impl PushSrcImpl for ZenohSrc {
             feature = "compression-lz4",
             feature = "compression-gzip"
         )))]
-        if let Some(attachment) = sample.attachment() {
+        let parsed_metadata = if let Some(attachment) = sample.attachment() {
             match MetadataParser::parse(attachment) {
                 Ok(metadata) => {
                     // If caps are present in metadata, set them on the source pad
@@ -786,12 +804,17 @@ impl PushSrcImpl for ZenohSrc {
                             metadata.user_metadata()
                         );
                     }
+
+                    Some(metadata)
                 }
                 Err(e) => {
                     gst::warning!(CAT, imp = self, "Failed to parse metadata: {}", e);
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
 
         let payload = sample.payload();
         let compressed_data = payload.to_bytes();
@@ -864,38 +887,67 @@ impl PushSrcImpl for ZenohSrc {
                 gst::FlowError::Error
             })?;
 
-            // Extract Zenoh timestamp if available and apply it to the buffer
-            // This helps with synchronization and proper buffer timestamping
-            if let Some(timestamp) = sample.timestamp() {
-                // Zenoh timestamps are in NTP64 format (64-bit timestamp)
-                // Convert to GStreamer ClockTime (nanoseconds since epoch)
-                let ntp_time = timestamp.get_time();
+            // Apply buffer timing metadata if enabled and available
+            // This preserves PTS, DTS, duration, offset, and flags from the sender
+            if apply_buffer_meta {
+                if let Some(ref metadata) = parsed_metadata {
+                    // Check if we have buffer timing metadata
+                    let has_timing = metadata.pts().is_some()
+                        || metadata.dts().is_some()
+                        || metadata.duration().is_some()
+                        || metadata.offset().is_some()
+                        || metadata.offset_end().is_some()
+                        || metadata.flags().is_some();
 
-                // NTP64 timestamp is split into:
-                // - upper 32 bits: seconds since NTP epoch (Jan 1, 1900)
-                // - lower 32 bits: fractional seconds
-                // We need to convert this to nanoseconds since Unix epoch (Jan 1, 1970)
+                    if has_timing {
+                        metadata.apply_to_buffer(buffer_mut);
+                        gst::trace!(
+                            CAT,
+                            imp = self,
+                            "Applied buffer timing metadata: PTS={:?}, DTS={:?}, duration={:?}, flags={:?}",
+                            metadata.pts(),
+                            metadata.dts(),
+                            metadata.duration(),
+                            metadata.flags()
+                        );
+                    }
+                }
+            }
 
-                // NTP epoch is 2208988800 seconds before Unix epoch
-                const NTP_UNIX_OFFSET: u64 = 2208988800;
+            // If no buffer timing metadata was applied, try Zenoh timestamp as fallback
+            // This is useful when receiving from a sender that doesn't use buffer metadata
+            if buffer_mut.pts().is_none() {
+                if let Some(timestamp) = sample.timestamp() {
+                    // Zenoh timestamps are in NTP64 format (64-bit timestamp)
+                    // Convert to GStreamer ClockTime (nanoseconds since epoch)
+                    let ntp_time = timestamp.get_time();
 
-                let ntp_secs = ntp_time.as_secs() as u64;
-                let ntp_nanos = ntp_time.subsec_nanos() as u64;
+                    // NTP64 timestamp is split into:
+                    // - upper 32 bits: seconds since NTP epoch (Jan 1, 1900)
+                    // - lower 32 bits: fractional seconds
+                    // We need to convert this to nanoseconds since Unix epoch (Jan 1, 1970)
 
-                // Convert to Unix epoch
-                if ntp_secs >= NTP_UNIX_OFFSET {
-                    let unix_secs = ntp_secs - NTP_UNIX_OFFSET;
-                    let total_nanos = unix_secs * 1_000_000_000 + ntp_nanos;
+                    // NTP epoch is 2208988800 seconds before Unix epoch
+                    const NTP_UNIX_OFFSET: u64 = 2208988800;
 
-                    let pts = gst::ClockTime::from_nseconds(total_nanos);
-                    buffer_mut.set_pts(pts);
+                    let ntp_secs = ntp_time.as_secs() as u64;
+                    let ntp_nanos = ntp_time.subsec_nanos() as u64;
 
-                    gst::trace!(
-                        CAT,
-                        imp = self,
-                        "Applied Zenoh timestamp to buffer: PTS = {}",
-                        pts
-                    );
+                    // Convert to Unix epoch
+                    if ntp_secs >= NTP_UNIX_OFFSET {
+                        let unix_secs = ntp_secs - NTP_UNIX_OFFSET;
+                        let total_nanos = unix_secs * 1_000_000_000 + ntp_nanos;
+
+                        let pts = gst::ClockTime::from_nseconds(total_nanos);
+                        buffer_mut.set_pts(pts);
+
+                        gst::trace!(
+                            CAT,
+                            imp = self,
+                            "Applied Zenoh timestamp to buffer: PTS = {}",
+                            pts
+                        );
+                    }
                 }
             }
         }
@@ -947,6 +999,9 @@ impl URIHandlerImpl for ZenohSrc {
                 "receive-timeout-ms={}",
                 settings.receive_timeout_ms
             ));
+        }
+        if !settings.apply_buffer_meta {
+            params.push("apply-buffer-meta=false".to_string());
         }
 
         if !params.is_empty() {
@@ -1059,6 +1114,18 @@ impl URIHandlerImpl for ZenohSrc {
                             })?;
                             // Clamp to valid range
                             settings.receive_timeout_ms = timeout.clamp(10, 5000);
+                        }
+                        "apply-buffer-meta" => {
+                            settings.apply_buffer_meta = match value.as_str() {
+                                "true" | "1" | "yes" => true,
+                                "false" | "0" | "no" => false,
+                                _ => {
+                                    return Err(glib::Error::new(
+                                        gst::URIError::BadUri,
+                                        &format!("Invalid apply-buffer-meta value: {}", value),
+                                    ));
+                                }
+                            };
                         }
                         _ => {
                             gst::warning!(CAT, imp = self, "Unknown URI parameter: {}", key);

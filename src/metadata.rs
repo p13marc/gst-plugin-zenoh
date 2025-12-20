@@ -19,15 +19,33 @@ pub mod keys {
     pub const VERSION: &str = "gst.version";
     /// Compression algorithm used (if any)
     pub const COMPRESSION: &str = "gst.compression";
+    /// Buffer presentation timestamp in nanoseconds
+    pub const PTS: &str = "gst.pts";
+    /// Buffer decoding timestamp in nanoseconds
+    pub const DTS: &str = "gst.dts";
+    /// Buffer duration in nanoseconds
+    pub const DURATION: &str = "gst.duration";
+    /// Buffer byte offset
+    pub const OFFSET: &str = "gst.offset";
+    /// Buffer byte offset end
+    pub const OFFSET_END: &str = "gst.offset-end";
+    /// Buffer flags (comma-separated)
+    pub const FLAGS: &str = "gst.flags";
 }
 
-/// Current metadata format version
-pub const METADATA_VERSION: &str = "1.0";
+/// Current metadata format version (1.1 adds buffer timing support)
+pub const METADATA_VERSION: &str = "1.1";
 
 /// Builder for creating Zenoh attachments with GStreamer metadata
 #[derive(Debug, Default)]
 pub struct MetadataBuilder {
     caps: Option<gst::Caps>,
+    pts: Option<gst::ClockTime>,
+    dts: Option<gst::ClockTime>,
+    duration: Option<gst::ClockTime>,
+    offset: Option<u64>,
+    offset_end: Option<u64>,
+    flags: Option<gst::BufferFlags>,
     user_metadata: HashMap<String, String>,
 }
 
@@ -43,6 +61,53 @@ impl MetadataBuilder {
         self
     }
 
+    /// Set buffer timing information from a GStreamer buffer
+    ///
+    /// This extracts PTS, DTS, duration, offset, offset_end, and flags from the buffer.
+    pub fn buffer_timing(mut self, buffer: &gst::Buffer) -> Self {
+        self.pts = buffer.pts();
+        self.dts = buffer.dts();
+        self.duration = buffer.duration();
+
+        // Only include offset if it's valid (not u64::MAX which means "none")
+        let offset = buffer.offset();
+        if offset != u64::MAX {
+            self.offset = Some(offset);
+        }
+
+        let offset_end = buffer.offset_end();
+        if offset_end != u64::MAX {
+            self.offset_end = Some(offset_end);
+        }
+
+        self.flags = Some(buffer.flags());
+        self
+    }
+
+    /// Set the presentation timestamp
+    pub fn pts(mut self, pts: Option<gst::ClockTime>) -> Self {
+        self.pts = pts;
+        self
+    }
+
+    /// Set the decoding timestamp
+    pub fn dts(mut self, dts: Option<gst::ClockTime>) -> Self {
+        self.dts = dts;
+        self
+    }
+
+    /// Set the buffer duration
+    pub fn duration(mut self, duration: Option<gst::ClockTime>) -> Self {
+        self.duration = duration;
+        self
+    }
+
+    /// Set the buffer flags
+    pub fn flags(mut self, flags: gst::BufferFlags) -> Self {
+        self.flags = Some(flags);
+        self
+    }
+
     /// Add custom user metadata
     pub fn user_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.user_metadata.insert(key.into(), value.into());
@@ -54,6 +119,8 @@ impl MetadataBuilder {
     /// The attachment is encoded as a simple key-value format:
     /// - Format: "key1=value1\nkey2=value2\n..."
     /// - Caps are serialized using their string representation
+    /// - Timestamps are serialized as nanoseconds
+    /// - Flags are serialized as comma-separated names
     pub fn build(self) -> Option<ZBytes> {
         let mut parts = Vec::new();
 
@@ -66,6 +133,29 @@ impl MetadataBuilder {
             // Escape newlines in caps
             let caps_escaped = caps_str.replace('\n', "\\n");
             parts.push(format!("{}={}", keys::CAPS, caps_escaped));
+        }
+
+        // Add buffer timing metadata
+        if let Some(pts) = self.pts {
+            parts.push(format!("{}={}", keys::PTS, pts.nseconds()));
+        }
+        if let Some(dts) = self.dts {
+            parts.push(format!("{}={}", keys::DTS, dts.nseconds()));
+        }
+        if let Some(duration) = self.duration {
+            parts.push(format!("{}={}", keys::DURATION, duration.nseconds()));
+        }
+        if let Some(offset) = self.offset {
+            parts.push(format!("{}={}", keys::OFFSET, offset));
+        }
+        if let Some(offset_end) = self.offset_end {
+            parts.push(format!("{}={}", keys::OFFSET_END, offset_end));
+        }
+        if let Some(flags) = self.flags {
+            let flags_str = flags_to_string(flags);
+            if !flags_str.is_empty() {
+                parts.push(format!("{}={}", keys::FLAGS, flags_str));
+            }
         }
 
         // Add user metadata
@@ -89,10 +179,73 @@ impl MetadataBuilder {
     }
 }
 
+/// Convert GStreamer buffer flags to a comma-separated string
+fn flags_to_string(flags: gst::BufferFlags) -> String {
+    let mut parts = Vec::new();
+
+    if flags.contains(gst::BufferFlags::LIVE) {
+        parts.push("live");
+    }
+    if flags.contains(gst::BufferFlags::DISCONT) {
+        parts.push("discont");
+    }
+    if flags.contains(gst::BufferFlags::DELTA_UNIT) {
+        parts.push("delta");
+    }
+    if flags.contains(gst::BufferFlags::HEADER) {
+        parts.push("header");
+    }
+    if flags.contains(gst::BufferFlags::GAP) {
+        parts.push("gap");
+    }
+    if flags.contains(gst::BufferFlags::DROPPABLE) {
+        parts.push("droppable");
+    }
+    if flags.contains(gst::BufferFlags::MARKER) {
+        parts.push("marker");
+    }
+    if flags.contains(gst::BufferFlags::CORRUPTED) {
+        parts.push("corrupted");
+    }
+    if flags.contains(gst::BufferFlags::NON_DROPPABLE) {
+        parts.push("non-droppable");
+    }
+
+    parts.join(",")
+}
+
+/// Parse a comma-separated string back to GStreamer buffer flags
+fn string_to_flags(s: &str) -> gst::BufferFlags {
+    let mut flags = gst::BufferFlags::empty();
+
+    for part in s.split(',') {
+        match part.trim() {
+            "live" => flags |= gst::BufferFlags::LIVE,
+            "discont" => flags |= gst::BufferFlags::DISCONT,
+            "delta" => flags |= gst::BufferFlags::DELTA_UNIT,
+            "header" => flags |= gst::BufferFlags::HEADER,
+            "gap" => flags |= gst::BufferFlags::GAP,
+            "droppable" => flags |= gst::BufferFlags::DROPPABLE,
+            "marker" => flags |= gst::BufferFlags::MARKER,
+            "corrupted" => flags |= gst::BufferFlags::CORRUPTED,
+            "non-droppable" => flags |= gst::BufferFlags::NON_DROPPABLE,
+            _ => {} // Ignore unknown flags for forward compatibility
+        }
+    }
+
+    flags
+}
+
 /// Parse metadata from a Zenoh attachment
 #[derive(Debug, Default)]
 pub struct MetadataParser {
     caps: Option<gst::Caps>,
+    pts: Option<gst::ClockTime>,
+    dts: Option<gst::ClockTime>,
+    duration: Option<gst::ClockTime>,
+    offset: Option<u64>,
+    offset_end: Option<u64>,
+    flags: Option<gst::BufferFlags>,
     user_metadata: HashMap<String, String>,
     version: Option<String>,
 }
@@ -131,6 +284,34 @@ impl MetadataParser {
                         }
                     }
                 }
+                keys::PTS => {
+                    if let Ok(ns) = value_unescaped.parse::<u64>() {
+                        parser.pts = Some(gst::ClockTime::from_nseconds(ns));
+                    }
+                }
+                keys::DTS => {
+                    if let Ok(ns) = value_unescaped.parse::<u64>() {
+                        parser.dts = Some(gst::ClockTime::from_nseconds(ns));
+                    }
+                }
+                keys::DURATION => {
+                    if let Ok(ns) = value_unescaped.parse::<u64>() {
+                        parser.duration = Some(gst::ClockTime::from_nseconds(ns));
+                    }
+                }
+                keys::OFFSET => {
+                    if let Ok(offset) = value_unescaped.parse::<u64>() {
+                        parser.offset = Some(offset);
+                    }
+                }
+                keys::OFFSET_END => {
+                    if let Ok(offset_end) = value_unescaped.parse::<u64>() {
+                        parser.offset_end = Some(offset_end);
+                    }
+                }
+                keys::FLAGS => {
+                    parser.flags = Some(string_to_flags(&value_unescaped));
+                }
                 k if k.starts_with(keys::USER_PREFIX) => {
                     let user_key = k.trim_start_matches(keys::USER_PREFIX);
                     parser
@@ -151,6 +332,36 @@ impl MetadataParser {
         self.caps.as_ref()
     }
 
+    /// Get the presentation timestamp
+    pub fn pts(&self) -> Option<gst::ClockTime> {
+        self.pts
+    }
+
+    /// Get the decoding timestamp
+    pub fn dts(&self) -> Option<gst::ClockTime> {
+        self.dts
+    }
+
+    /// Get the buffer duration
+    pub fn duration(&self) -> Option<gst::ClockTime> {
+        self.duration
+    }
+
+    /// Get the buffer offset
+    pub fn offset(&self) -> Option<u64> {
+        self.offset
+    }
+
+    /// Get the buffer offset end
+    pub fn offset_end(&self) -> Option<u64> {
+        self.offset_end
+    }
+
+    /// Get the buffer flags
+    pub fn flags(&self) -> Option<gst::BufferFlags> {
+        self.flags
+    }
+
     /// Get the metadata format version
     pub fn version(&self) -> Option<&str> {
         self.version.as_deref()
@@ -164,6 +375,31 @@ impl MetadataParser {
     /// Get a specific user metadata value
     pub fn get_user_metadata(&self, key: &str) -> Option<&str> {
         self.user_metadata.get(key).map(|s| s.as_str())
+    }
+
+    /// Apply parsed buffer timing to a mutable buffer
+    ///
+    /// This sets PTS, DTS, duration, offset, offset_end, and flags on the buffer
+    /// from the parsed metadata.
+    pub fn apply_to_buffer(&self, buffer: &mut gst::BufferRef) {
+        if let Some(pts) = self.pts {
+            buffer.set_pts(pts);
+        }
+        if let Some(dts) = self.dts {
+            buffer.set_dts(dts);
+        }
+        if let Some(duration) = self.duration {
+            buffer.set_duration(duration);
+        }
+        if let Some(offset) = self.offset {
+            buffer.set_offset(offset);
+        }
+        if let Some(offset_end) = self.offset_end {
+            buffer.set_offset_end(offset_end);
+        }
+        if let Some(flags) = self.flags {
+            buffer.set_flags(flags);
+        }
     }
 }
 
@@ -256,5 +492,208 @@ mod tests {
             parser.get_user_metadata("multiline"),
             Some(value_with_newline)
         );
+    }
+
+    #[test]
+    fn test_buffer_timing_round_trip() {
+        gst::init().unwrap();
+
+        let pts = gst::ClockTime::from_nseconds(1_000_000_000); // 1 second
+        let dts = gst::ClockTime::from_nseconds(900_000_000); // 0.9 seconds
+        let duration = gst::ClockTime::from_nseconds(33_333_333); // ~30fps frame
+
+        let zbytes = MetadataBuilder::new()
+            .pts(Some(pts))
+            .dts(Some(dts))
+            .duration(Some(duration))
+            .flags(gst::BufferFlags::DELTA_UNIT | gst::BufferFlags::DISCONT)
+            .build()
+            .expect("Failed to build");
+
+        let parser = MetadataParser::parse(&zbytes).expect("Failed to parse");
+
+        assert_eq!(parser.pts(), Some(pts));
+        assert_eq!(parser.dts(), Some(dts));
+        assert_eq!(parser.duration(), Some(duration));
+
+        let flags = parser.flags().expect("Should have flags");
+        assert!(flags.contains(gst::BufferFlags::DELTA_UNIT));
+        assert!(flags.contains(gst::BufferFlags::DISCONT));
+        assert!(!flags.contains(gst::BufferFlags::HEADER));
+    }
+
+    #[test]
+    fn test_buffer_timing_from_buffer() {
+        gst::init().unwrap();
+
+        // Create a buffer with timing info
+        let mut buffer = gst::Buffer::with_size(100).unwrap();
+        {
+            let buffer_ref = buffer.get_mut().unwrap();
+            buffer_ref.set_pts(gst::ClockTime::from_nseconds(2_000_000_000));
+            buffer_ref.set_dts(gst::ClockTime::from_nseconds(1_900_000_000));
+            buffer_ref.set_duration(gst::ClockTime::from_nseconds(40_000_000));
+            buffer_ref.set_offset(1024);
+            buffer_ref.set_offset_end(2048);
+            buffer_ref.set_flags(gst::BufferFlags::HEADER | gst::BufferFlags::MARKER);
+        }
+
+        // Build metadata from buffer
+        let zbytes = MetadataBuilder::new()
+            .buffer_timing(&buffer)
+            .build()
+            .expect("Failed to build");
+
+        // Parse it back
+        let parser = MetadataParser::parse(&zbytes).expect("Failed to parse");
+
+        assert_eq!(
+            parser.pts(),
+            Some(gst::ClockTime::from_nseconds(2_000_000_000))
+        );
+        assert_eq!(
+            parser.dts(),
+            Some(gst::ClockTime::from_nseconds(1_900_000_000))
+        );
+        assert_eq!(
+            parser.duration(),
+            Some(gst::ClockTime::from_nseconds(40_000_000))
+        );
+        assert_eq!(parser.offset(), Some(1024));
+        assert_eq!(parser.offset_end(), Some(2048));
+
+        let flags = parser.flags().expect("Should have flags");
+        assert!(flags.contains(gst::BufferFlags::HEADER));
+        assert!(flags.contains(gst::BufferFlags::MARKER));
+    }
+
+    #[test]
+    fn test_apply_to_buffer() {
+        gst::init().unwrap();
+
+        let pts = gst::ClockTime::from_nseconds(3_000_000_000);
+        let dts = gst::ClockTime::from_nseconds(2_900_000_000);
+        let duration = gst::ClockTime::from_nseconds(16_666_667); // ~60fps
+
+        let zbytes = MetadataBuilder::new()
+            .pts(Some(pts))
+            .dts(Some(dts))
+            .duration(Some(duration))
+            .flags(gst::BufferFlags::LIVE | gst::BufferFlags::DISCONT)
+            .build()
+            .expect("Failed to build");
+
+        let parser = MetadataParser::parse(&zbytes).expect("Failed to parse");
+
+        // Create a new buffer and apply the parsed timing
+        let mut buffer = gst::Buffer::with_size(100).unwrap();
+        {
+            let buffer_ref = buffer.get_mut().unwrap();
+            parser.apply_to_buffer(buffer_ref);
+        }
+
+        // Verify the buffer has the correct timing
+        assert_eq!(buffer.pts(), Some(pts));
+        assert_eq!(buffer.dts(), Some(dts));
+        assert_eq!(buffer.duration(), Some(duration));
+        assert!(buffer.flags().contains(gst::BufferFlags::LIVE));
+        assert!(buffer.flags().contains(gst::BufferFlags::DISCONT));
+    }
+
+    #[test]
+    fn test_flags_serialization() {
+        // Test all supported flags
+        let all_flags = gst::BufferFlags::LIVE
+            | gst::BufferFlags::DISCONT
+            | gst::BufferFlags::DELTA_UNIT
+            | gst::BufferFlags::HEADER
+            | gst::BufferFlags::GAP
+            | gst::BufferFlags::DROPPABLE
+            | gst::BufferFlags::MARKER
+            | gst::BufferFlags::CORRUPTED
+            | gst::BufferFlags::NON_DROPPABLE;
+
+        let flags_str = flags_to_string(all_flags);
+        let parsed_flags = string_to_flags(&flags_str);
+
+        assert!(parsed_flags.contains(gst::BufferFlags::LIVE));
+        assert!(parsed_flags.contains(gst::BufferFlags::DISCONT));
+        assert!(parsed_flags.contains(gst::BufferFlags::DELTA_UNIT));
+        assert!(parsed_flags.contains(gst::BufferFlags::HEADER));
+        assert!(parsed_flags.contains(gst::BufferFlags::GAP));
+        assert!(parsed_flags.contains(gst::BufferFlags::DROPPABLE));
+        assert!(parsed_flags.contains(gst::BufferFlags::MARKER));
+        assert!(parsed_flags.contains(gst::BufferFlags::CORRUPTED));
+        assert!(parsed_flags.contains(gst::BufferFlags::NON_DROPPABLE));
+    }
+
+    #[test]
+    fn test_empty_flags() {
+        let empty_flags = gst::BufferFlags::empty();
+        let flags_str = flags_to_string(empty_flags);
+        assert!(flags_str.is_empty());
+
+        let parsed = string_to_flags("");
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_combined_caps_and_timing() {
+        gst::init().unwrap();
+
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("width", 1280)
+            .field("height", 720)
+            .build();
+
+        let pts = gst::ClockTime::from_nseconds(5_000_000_000);
+
+        let zbytes = MetadataBuilder::new()
+            .caps(&caps)
+            .pts(Some(pts))
+            .duration(Some(gst::ClockTime::from_nseconds(33_333_333)))
+            .flags(gst::BufferFlags::DELTA_UNIT)
+            .user_metadata("source", "camera1")
+            .build()
+            .expect("Failed to build");
+
+        let parser = MetadataParser::parse(&zbytes).expect("Failed to parse");
+
+        // Verify all fields
+        assert!(parser.caps().is_some());
+        assert_eq!(parser.pts(), Some(pts));
+        assert_eq!(
+            parser.duration(),
+            Some(gst::ClockTime::from_nseconds(33_333_333))
+        );
+        assert!(parser
+            .flags()
+            .unwrap()
+            .contains(gst::BufferFlags::DELTA_UNIT));
+        assert_eq!(parser.get_user_metadata("source"), Some("camera1"));
+
+        // Verify caps content
+        let parsed_caps = parser.caps().unwrap();
+        let structure = parsed_caps.structure(0).unwrap();
+        assert_eq!(structure.get::<i32>("width").unwrap(), 1280);
+    }
+
+    #[test]
+    fn test_backward_compatibility() {
+        gst::init().unwrap();
+
+        // Simulate a v1.0 message without timing fields
+        let old_format = "gst.version=1.0\ngst.caps=video/x-raw";
+        let zbytes = ZBytes::from(old_format.as_bytes().to_vec());
+
+        let parser = MetadataParser::parse(&zbytes).expect("Failed to parse");
+
+        // Should parse successfully with None for timing fields
+        assert_eq!(parser.version(), Some("1.0"));
+        assert!(parser.caps().is_some());
+        assert!(parser.pts().is_none());
+        assert!(parser.dts().is_none());
+        assert!(parser.duration().is_none());
+        assert!(parser.flags().is_none());
     }
 }

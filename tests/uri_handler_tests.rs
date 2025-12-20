@@ -516,3 +516,153 @@ fn test_zenohsrc_receive_timeout_invalid_uri() {
         "Should reject invalid receive-timeout-ms value"
     );
 }
+
+// ============================================================================
+// Buffer Metadata Tests
+// ============================================================================
+
+#[test]
+#[serial]
+fn test_zenohsink_send_buffer_meta_property() {
+    init();
+
+    let sink = gst::ElementFactory::make("zenohsink")
+        .build()
+        .expect("Failed to create zenohsink");
+
+    // Check default value (true)
+    let send_buffer_meta: bool = sink.property("send-buffer-meta");
+    assert!(send_buffer_meta, "send-buffer-meta should default to true");
+
+    // Set to false
+    sink.set_property("send-buffer-meta", false);
+    let send_buffer_meta: bool = sink.property("send-buffer-meta");
+    assert!(
+        !send_buffer_meta,
+        "send-buffer-meta should be false after setting"
+    );
+
+    // Set back to true
+    sink.set_property("send-buffer-meta", true);
+    let send_buffer_meta: bool = sink.property("send-buffer-meta");
+    assert!(
+        send_buffer_meta,
+        "send-buffer-meta should be true after setting"
+    );
+}
+
+#[test]
+#[serial]
+fn test_zenohsrc_apply_buffer_meta_property() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    // Check default value (true)
+    let apply_buffer_meta: bool = src.property("apply-buffer-meta");
+    assert!(
+        apply_buffer_meta,
+        "apply-buffer-meta should default to true"
+    );
+
+    // Set to false
+    src.set_property("apply-buffer-meta", false);
+    let apply_buffer_meta: bool = src.property("apply-buffer-meta");
+    assert!(
+        !apply_buffer_meta,
+        "apply-buffer-meta should be false after setting"
+    );
+
+    // Set back to true
+    src.set_property("apply-buffer-meta", true);
+    let apply_buffer_meta: bool = src.property("apply-buffer-meta");
+    assert!(
+        apply_buffer_meta,
+        "apply-buffer-meta should be true after setting"
+    );
+}
+
+#[test]
+#[serial]
+fn test_zenohsrc_apply_buffer_meta_in_uri() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    let uri_handler = src.dynamic_cast_ref::<gst::URIHandler>().unwrap();
+
+    // Set URI with apply-buffer-meta=false
+    uri_handler
+        .set_uri("zenoh:demo/video?apply-buffer-meta=false")
+        .expect("Failed to set URI");
+
+    let key_expr: String = src.property("key-expr");
+    let apply_buffer_meta: bool = src.property("apply-buffer-meta");
+
+    assert_eq!(key_expr, "demo/video");
+    assert!(
+        !apply_buffer_meta,
+        "apply-buffer-meta should be false from URI"
+    );
+
+    // Also test with "true" value
+    uri_handler
+        .set_uri("zenoh:demo/audio?apply-buffer-meta=true")
+        .expect("Failed to set URI");
+
+    let apply_buffer_meta: bool = src.property("apply-buffer-meta");
+    assert!(
+        apply_buffer_meta,
+        "apply-buffer-meta should be true from URI"
+    );
+}
+
+#[test]
+#[serial]
+fn test_zenohsrc_apply_buffer_meta_uri_roundtrip() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    // Set properties including non-default apply-buffer-meta
+    src.set_property("key-expr", "demo/video");
+    src.set_property("apply-buffer-meta", false);
+
+    let uri_handler = src.dynamic_cast_ref::<gst::URIHandler>().unwrap();
+
+    // Get URI - should include apply-buffer-meta since it's non-default
+    let uri = uri_handler.uri().unwrap();
+
+    assert!(uri.contains("demo/video"));
+    assert!(
+        uri.contains("apply-buffer-meta=false"),
+        "URI should contain non-default apply-buffer-meta: {}",
+        uri
+    );
+}
+
+#[test]
+#[serial]
+fn test_zenohsrc_apply_buffer_meta_invalid_uri() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    let uri_handler = src.dynamic_cast_ref::<gst::URIHandler>().unwrap();
+
+    // Try to set URI with invalid apply-buffer-meta value
+    let result = uri_handler.set_uri("zenoh:demo/video?apply-buffer-meta=invalid");
+
+    assert!(
+        result.is_err(),
+        "Should reject invalid apply-buffer-meta value"
+    );
+}
