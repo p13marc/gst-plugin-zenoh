@@ -855,12 +855,13 @@ impl BaseSinkImpl for ZenohSink {
         };
 
         // Apply compression if enabled
+        // Use Cow to avoid unnecessary copy when compression is disabled
         #[cfg(any(
             feature = "compression-zstd",
             feature = "compression-lz4",
             feature = "compression-gzip"
         ))]
-        let (data_to_send, compressed) = if compression_type
+        let (data_to_send, compressed): (std::borrow::Cow<'_, [u8]>, bool) = if compression_type
             != crate::compression::CompressionType::None
         {
             match crate::compression::compress(b.as_slice(), compression_type, compression_level) {
@@ -875,7 +876,7 @@ impl BaseSinkImpl for ZenohSink {
                         compression_level,
                         (compressed_data.len() as f64 / original_size as f64) * 100.0
                     );
-                    (compressed_data, true)
+                    (std::borrow::Cow::Owned(compressed_data), true)
                 }
                 Err(e) => {
                     gst::warning!(
@@ -885,11 +886,13 @@ impl BaseSinkImpl for ZenohSink {
                         e
                     );
                     started.stats.lock().unwrap().errors += 1;
-                    (b.as_slice().to_vec(), false)
+                    // No copy - borrow the original slice
+                    (std::borrow::Cow::Borrowed(b.as_slice()), false)
                 }
             }
         } else {
-            (b.as_slice().to_vec(), false)
+            // No compression - borrow the original slice (zero-copy)
+            (std::borrow::Cow::Borrowed(b.as_slice()), false)
         };
 
         #[cfg(not(any(
@@ -897,7 +900,9 @@ impl BaseSinkImpl for ZenohSink {
             feature = "compression-lz4",
             feature = "compression-gzip"
         )))]
-        let (data_to_send, compressed) = (b.as_slice().to_vec(), false);
+        // No compression features - borrow the original slice (zero-copy)
+        let (data_to_send, compressed): (std::borrow::Cow<'_, [u8]>, bool) =
+            (std::borrow::Cow::Borrowed(b.as_slice()), false);
 
         // Smart caps transmission: send caps when needed, not on every buffer
         let (send_caps, caps_interval, send_buffer_meta) = {
