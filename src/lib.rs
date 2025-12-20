@@ -76,6 +76,7 @@ use gst::glib;
 mod error;
 pub mod metadata;
 pub mod utils;
+mod zenohdemux;
 mod zenohsink;
 mod zenohsrc;
 
@@ -89,6 +90,7 @@ pub mod compression;
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     zenohsink::register(plugin)?;
     zenohsrc::register(plugin)?;
+    zenohdemux::register(plugin)?;
     Ok(())
 }
 

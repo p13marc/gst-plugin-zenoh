@@ -31,6 +31,8 @@ pub mod keys {
     pub const OFFSET_END: &str = "gst.offset-end";
     /// Buffer flags (comma-separated)
     pub const FLAGS: &str = "gst.flags";
+    /// Zenoh key expression the sample was received on
+    pub const KEY_EXPR: &str = "zenoh.key-expr";
 }
 
 /// Current metadata format version (1.1 adds buffer timing support)
@@ -46,6 +48,7 @@ pub struct MetadataBuilder {
     offset: Option<u64>,
     offset_end: Option<u64>,
     flags: Option<gst::BufferFlags>,
+    key_expr: Option<String>,
     user_metadata: HashMap<String, String>,
 }
 
@@ -108,6 +111,12 @@ impl MetadataBuilder {
         self
     }
 
+    /// Set the Zenoh key expression
+    pub fn key_expr(mut self, key_expr: impl Into<String>) -> Self {
+        self.key_expr = Some(key_expr.into());
+        self
+    }
+
     /// Add custom user metadata
     pub fn user_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.user_metadata.insert(key.into(), value.into());
@@ -156,6 +165,13 @@ impl MetadataBuilder {
             if !flags_str.is_empty() {
                 parts.push(format!("{}={}", keys::FLAGS, flags_str));
             }
+        }
+
+        // Add key expression if present
+        if let Some(key_expr) = self.key_expr {
+            // Escape newlines in key expression (unlikely but safe)
+            let key_expr_escaped = key_expr.replace('\n', "\\n");
+            parts.push(format!("{}={}", keys::KEY_EXPR, key_expr_escaped));
         }
 
         // Add user metadata
@@ -246,6 +262,7 @@ pub struct MetadataParser {
     offset: Option<u64>,
     offset_end: Option<u64>,
     flags: Option<gst::BufferFlags>,
+    key_expr: Option<String>,
     user_metadata: HashMap<String, String>,
     version: Option<String>,
 }
@@ -312,6 +329,9 @@ impl MetadataParser {
                 keys::FLAGS => {
                     parser.flags = Some(string_to_flags(&value_unescaped));
                 }
+                keys::KEY_EXPR => {
+                    parser.key_expr = Some(value_unescaped);
+                }
                 k if k.starts_with(keys::USER_PREFIX) => {
                     let user_key = k.trim_start_matches(keys::USER_PREFIX);
                     parser
@@ -360,6 +380,11 @@ impl MetadataParser {
     /// Get the buffer flags
     pub fn flags(&self) -> Option<gst::BufferFlags> {
         self.flags
+    }
+
+    /// Get the Zenoh key expression
+    pub fn key_expr(&self) -> Option<&str> {
+        self.key_expr.as_deref()
     }
 
     /// Get the metadata format version
