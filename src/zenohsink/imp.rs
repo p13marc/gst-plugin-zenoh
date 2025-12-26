@@ -942,8 +942,8 @@ impl BaseSinkImpl for ZenohSink {
                     } else if caps_interval > 0 {
                         // Check if it's time for periodic transmission
                         let last_time = started.last_caps_time.lock().unwrap();
-                        if let Some(last) = *last_time {
-                            if last.elapsed().as_secs() >= caps_interval as u64 {
+                        if let Some(last) = *last_time
+                            && last.elapsed().as_secs() >= caps_interval as u64 {
                                 gst::trace!(
                                     CAT,
                                     imp = self,
@@ -955,7 +955,6 @@ impl BaseSinkImpl for ZenohSink {
                                 *started.last_caps_time.lock().unwrap() =
                                     Some(std::time::Instant::now());
                             }
-                        }
                     }
                 }
 
@@ -1175,14 +1174,13 @@ impl BaseSinkImpl for ZenohSink {
                         *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
                     } else if caps_interval > 0 {
                         let last_time = started.last_caps_time.lock().unwrap();
-                        if let Some(last) = *last_time {
-                            if last.elapsed().as_secs() >= caps_interval as u64 {
+                        if let Some(last) = *last_time
+                            && last.elapsed().as_secs() >= caps_interval as u64 {
                                 should_send = true;
                                 drop(last_time);
                                 *started.last_caps_time.lock().unwrap() =
                                     Some(std::time::Instant::now());
                             }
-                        }
                     }
                 }
 

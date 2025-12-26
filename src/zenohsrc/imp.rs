@@ -889,8 +889,8 @@ impl PushSrcImpl for ZenohSrc {
 
             // Apply buffer timing metadata if enabled and available
             // This preserves PTS, DTS, duration, offset, and flags from the sender
-            if apply_buffer_meta {
-                if let Some(ref metadata) = parsed_metadata {
+            if apply_buffer_meta
+                && let Some(ref metadata) = parsed_metadata {
                     // Check if we have buffer timing metadata
                     let has_timing = metadata.pts().is_some()
                         || metadata.dts().is_some()
@@ -912,12 +912,11 @@ impl PushSrcImpl for ZenohSrc {
                         );
                     }
                 }
-            }
 
             // If no buffer timing metadata was applied, try Zenoh timestamp as fallback
             // This is useful when receiving from a sender that doesn't use buffer metadata
-            if buffer_mut.pts().is_none() {
-                if let Some(timestamp) = sample.timestamp() {
+            if buffer_mut.pts().is_none()
+                && let Some(timestamp) = sample.timestamp() {
                     // Zenoh timestamps are in NTP64 format (64-bit timestamp)
                     // Convert to GStreamer ClockTime (nanoseconds since epoch)
                     let ntp_time = timestamp.get_time();
@@ -949,7 +948,6 @@ impl PushSrcImpl for ZenohSrc {
                         );
                     }
                 }
-            }
         }
 
         // Update statistics on success

@@ -107,7 +107,7 @@ fn key_expr_to_pad_name(key_expr: &str, naming: PadNaming) -> String {
             // Use only the last segment of the key expression
             key_expr
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("unknown")
                 .replace('*', "wildcard")
                 .replace(' ', "_")
