@@ -21,7 +21,20 @@
 //! - **Error Recovery**: Comprehensive error handling and network resilience
 //! - **Optional Compression**: zstd, lz4, and gzip support via feature flags
 //!
-//! ## Usage
+//! ## Quick Start (gst-launch)
+//!
+//! ```bash
+//! # Set plugin path
+//! export GST_PLUGIN_PATH=/path/to/target/release
+//!
+//! # Sender
+//! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video
+//!
+//! # Receiver
+//! gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
+//! ```
+//!
+//! ## Rust API
 //!
 //! ### Strongly-Typed API (Recommended)
 //!
@@ -154,20 +167,6 @@
 //!     pipeline.set_state(gst::State::Null)?;
 //!     Ok(())
 //! }
-//! ```
-//!
-//! ## Command Line Usage
-//!
-//! ```bash
-//! # Set plugin path
-//! export GST_PLUGIN_PATH=/path/to/target/release
-//!
-//! # Simple streaming
-//! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video
-//! gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
-//!
-//! # Demultiplexing multiple streams
-//! gst-launch-1.0 zenohdemux key-expr="demo/**" ! queue ! autovideosink
 //! ```
 //!
 //! ## Examples
