@@ -5,6 +5,37 @@ All notable changes to gst-plugin-zenoh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-12-27
+
+### Added
+
+#### Session Sharing
+- **`session-group` property**: Share Zenoh sessions across elements using a named group
+  - Elements with the same `session-group` share a single Zenoh session
+  - Reduces network overhead and resource usage
+  - Works with gst-launch: `zenohsink key-expr=demo/video session-group=main`
+- **`session()` builder method**: Rust API for sharing sessions programmatically
+  - Pass a `zenoh::Session` directly to elements
+  - `zenoh::Session` is internally Arc-based, so cloning is cheap
+- **`set_session()` method**: Set shared session after element creation
+- **Session registry module** (`src/session.rs`): Internal module for managing shared sessions
+
+#### Strongly-Typed API Improvements
+- Added `set_session_group()` and `session_group()` methods to all elements
+- Added `session()` and `session_group()` methods to all builders
+
+### Changed
+
+- **Test coverage**: Added 10 new session sharing tests (131 total tests)
+- **Documentation**: Updated CLAUDE.md with session sharing section
+
+### Notes
+
+Session sharing is useful for:
+- Multi-stream pipelines (video + audio)
+- Reducing connection overhead in edge deployments
+- Sharing authentication/configuration across elements
+
 ## [0.2.0] - 2025-01-22
 
 ### Added

@@ -49,6 +49,7 @@ gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 
 - **QoS Control**: Reliability modes, congestion control, priority levels (1-7)
 - **Low Latency**: Express mode, zero-copy paths, efficient session management
+- **Session Sharing**: Share Zenoh sessions across elements to reduce overhead
 - **Compression**: Optional Zstandard, LZ4, or Gzip (compile-time features)
 - **Buffer Metadata**: PTS, DTS, duration, flags preserved for A/V sync
 - **Caps Transmission**: Automatic format negotiation between sender/receiver
