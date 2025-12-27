@@ -4,11 +4,13 @@ version = "0.2.0"
 authors = ["Marc Pardo <p13marc@gmail.com>"]
 license = "MPL-2.0"
 description = "High-performance GStreamer plugin for distributed media streaming using Zenoh protocol"
-repository = "https://github.com/p13marc/gst-plugin-zenoh.git"
+documentation = "https://docs.rs/gst-plugin-zenoh"
+repository = "https://github.com/p13marc/gst-plugin-zenoh"
 readme = "README.md"
 keywords = ["gstreamer", "zenoh", "streaming", "multimedia", "pubsub"]
 categories = ["multimedia::video", "network-programming"]
 edition = "2024"
+exclude = ["/.github", "/examples", "CLAUDE.md"]
 
 [lib]
 name = "gstzenoh"
@@ -47,3 +49,6 @@ compression-zstd = ["dep:zstd"]
 compression-lz4 = ["dep:lz4"]
 compression-gzip = ["dep:flate2"]
 compression = ["compression-zstd", "compression-lz4", "compression-gzip"]
+
+[package.metadata.docs.rs]
+all-features = true

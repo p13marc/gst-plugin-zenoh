@@ -1,35 +1,3 @@
-//! # GStreamer Zenoh Plugin
-//!
-//! This plugin provides GStreamer elements for sending and receiving data via the Zenoh protocol.
-//! Zenoh is a pub/sub, storage and query protocol that provides excellent performance
-//! and low latency for real-time data streaming.
-//!
-//! ## Elements
-//!
-//! * [`zenohsink`] - Publishes GStreamer buffers to a Zenoh key expression
-//! * [`zenohsrc`] - Subscribes to a Zenoh key expression and outputs GStreamer buffers
-//!
-//! ## Example Usage
-//!
-//! ### Sending data
-//! ```bash
-//! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video/stream
-//! ```
-//!
-//! ### Receiving data
-//! ```bash
-//! gst-launch-1.0 zenohsrc key-expr=demo/video/stream ! videoconvert ! autovideosink
-//! ```
-//!
-//! ## Configuration
-//!
-//! Both elements support Zenoh configuration through:
-//! - `config` property: Path to a Zenoh configuration file
-//! - Built-in properties for common settings (priority, reliability, congestion control)
-//!
-//! [`zenohsink`]: zenohsink::ZenohSink
-//! [`zenohsrc`]: zenohsrc::ZenohSrc
-
 //! # gst-plugin-zenoh
 //!
 //! A high-performance GStreamer plugin for distributed media streaming using Zenoh.
@@ -42,6 +10,7 @@
 //!
 //! - [`zenohsink`]: Publishes GStreamer buffers to Zenoh networks
 //! - [`zenohsrc`]: Subscribes to Zenoh data and delivers it to GStreamer pipelines
+//! - [`zenohdemux`]: Demultiplexes Zenoh streams by key expression, creating dynamic pads
 //!
 //! ## Features
 //!
@@ -50,16 +19,100 @@
 //! - **Session Sharing**: Efficient resource management across multiple elements
 //! - **Thread Safety**: Safe concurrent access to all components
 //! - **Error Recovery**: Comprehensive error handling and network resilience
+//! - **Optional Compression**: zstd, lz4, and gzip support via feature flags
 //!
-//! ## Quick Start
+//! ## Usage
+//!
+//! ### Using the Rust API
+//!
+//! Create elements programmatically with full type safety:
+//!
+//! ```no_run
+//! use gst::prelude::*;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     gst::init()?;
+//!     gstzenoh::plugin_register_static()?;
+//!
+//!     // Create a pipeline with zenohsink
+//!     let pipeline = gst::Pipeline::new();
+//!     let src = gst::ElementFactory::make("videotestsrc").build()?;
+//!     let sink = gst::ElementFactory::make("zenohsink")
+//!         .property("key-expr", "demo/video")
+//!         .property("reliability", "reliable")
+//!         .property("priority", 2i32)  // InteractiveHigh
+//!         .property("express", true)
+//!         .build()?;
+//!
+//!     pipeline.add_many([&src, &sink])?;
+//!     src.link(&sink)?;
+//!
+//!     pipeline.set_state(gst::State::Playing)?;
+//!     // ... run pipeline ...
+//!     pipeline.set_state(gst::State::Null)?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ### Receiving data with zenohsrc
+//!
+//! ```no_run
+//! use gst::prelude::*;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     gst::init()?;
+//!     gstzenoh::plugin_register_static()?;
+//!
+//!     let pipeline = gst::Pipeline::new();
+//!     let src = gst::ElementFactory::make("zenohsrc")
+//!         .property("key-expr", "demo/video")
+//!         .property("receive-timeout-ms", 5000i32)
+//!         .build()?;
+//!     let convert = gst::ElementFactory::make("videoconvert").build()?;
+//!     let sink = gst::ElementFactory::make("autovideosink").build()?;
+//!
+//!     pipeline.add_many([&src, &convert, &sink])?;
+//!     gst::Element::link_many([&src, &convert, &sink])?;
+//!
+//!     pipeline.set_state(gst::State::Playing)?;
+//!     // ... run pipeline ...
+//!     pipeline.set_state(gst::State::Null)?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ### Using parse_launch for quick prototyping
+//!
+//! ```no_run
+//! use gst::prelude::*;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     gst::init()?;
+//!     gstzenoh::plugin_register_static()?;
+//!
+//!     let pipeline = gst::parse::launch(
+//!         "videotestsrc ! zenohsink key-expr=demo/video"
+//!     )?;
+//!
+//!     pipeline.set_state(gst::State::Playing)?;
+//!     // ... run pipeline ...
+//!     pipeline.set_state(gst::State::Null)?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Command Line Usage
 //!
 //! ```bash
-//! # Build the plugin
-//! cargo build --release
+//! # Set plugin path
+//! export GST_PLUGIN_PATH=/path/to/target/release
 //!
-//! # Simple streaming example
+//! # Simple streaming
 //! gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video
 //! gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
+//!
+//! # Demultiplexing multiple streams
+//! gst-launch-1.0 zenohdemux key-expr="demo/**" ! queue ! autovideosink
 //! ```
 //!
 //! ## Examples
@@ -67,18 +120,20 @@
 //! See the `examples/` directory for comprehensive usage demonstrations:
 //! - `basic.rs`: Simple video streaming setup
 //! - `configuration.rs`: Advanced QoS configuration showcase
+//! - `video_stream.rs`: Full video streaming pipeline
 //!
 //! [`zenohsink`]: zenohsink
 //! [`zenohsrc`]: zenohsrc
+//! [`zenohdemux`]: zenohdemux
 
 use gst::glib;
 
 mod error;
 pub mod metadata;
 pub mod utils;
-mod zenohdemux;
-mod zenohsink;
-mod zenohsrc;
+pub mod zenohdemux;
+pub mod zenohsink;
+pub mod zenohsrc;
 
 #[cfg(any(
     feature = "compression-zstd",
