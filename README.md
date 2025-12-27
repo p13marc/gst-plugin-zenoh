@@ -97,6 +97,16 @@ gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video compression=zstd
 gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 ```
 
+### Feature Compatibility
+
+| Sender | Receiver | Result |
+|--------|----------|--------|
+| `compression=none` | Any build | Works |
+| `compression=zstd` | Built with `compression-zstd` | Works |
+| `compression=zstd` | Built without compression | Error logged, raw compressed bytes delivered |
+
+**Recommendation**: Build both sender and receiver with the same compression features, or use `--features compression` for full compatibility.
+
 ## Requirements
 
 - Rust 1.85+ (edition 2024)
