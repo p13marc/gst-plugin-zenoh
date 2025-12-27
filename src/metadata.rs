@@ -297,7 +297,7 @@ impl MetadataParser {
                     match gst::Caps::from_str(&value_unescaped) {
                         Ok(caps) => parser.caps = Some(caps),
                         Err(_) => {
-                            return Err(format!("Failed to parse caps '{}'", value_unescaped))
+                            return Err(format!("Failed to parse caps '{}'", value_unescaped));
                         }
                     }
                 }
@@ -691,10 +691,12 @@ mod tests {
             parser.duration(),
             Some(gst::ClockTime::from_nseconds(33_333_333))
         );
-        assert!(parser
-            .flags()
-            .unwrap()
-            .contains(gst::BufferFlags::DELTA_UNIT));
+        assert!(
+            parser
+                .flags()
+                .unwrap()
+                .contains(gst::BufferFlags::DELTA_UNIT)
+        );
         assert_eq!(parser.get_user_metadata("source"), Some("camera1"));
 
         // Verify caps content
@@ -720,5 +722,89 @@ mod tests {
         assert!(parser.dts().is_none());
         assert!(parser.duration().is_none());
         assert!(parser.flags().is_none());
+    }
+
+    #[test]
+    fn test_malformed_metadata_missing_equals() {
+        // Line without '=' should fail
+        let malformed = "gst.version=1.0\ninvalid_line_without_equals";
+        let zbytes = ZBytes::from(malformed.as_bytes().to_vec());
+
+        let result = MetadataParser::parse(&zbytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid metadata line"));
+    }
+
+    #[test]
+    fn test_malformed_metadata_invalid_utf8() {
+        // Invalid UTF-8 bytes
+        let invalid_utf8: Vec<u8> = vec![0xff, 0xfe, 0x00, 0x01];
+        let zbytes = ZBytes::from(invalid_utf8);
+
+        let result = MetadataParser::parse(&zbytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid UTF-8"));
+    }
+
+    #[test]
+    fn test_malformed_metadata_invalid_caps() {
+        gst::init().unwrap();
+
+        // Invalid caps string
+        let invalid_caps = "gst.version=1.0\ngst.caps=not_a_valid_caps!!!";
+        let zbytes = ZBytes::from(invalid_caps.as_bytes().to_vec());
+
+        let result = MetadataParser::parse(&zbytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse caps"));
+    }
+
+    #[test]
+    fn test_malformed_metadata_invalid_timestamp() {
+        // Invalid timestamp (not a number) - should be silently ignored
+        let invalid_ts = "gst.version=1.0\ngst.pts=not_a_number";
+        let zbytes = ZBytes::from(invalid_ts.as_bytes().to_vec());
+
+        // Should parse successfully, just skip the invalid field
+        let parser =
+            MetadataParser::parse(&zbytes).expect("Should parse despite invalid timestamp");
+        assert!(parser.pts().is_none()); // Invalid value is skipped
+    }
+
+    #[test]
+    fn test_unknown_keys_forward_compatibility() {
+        // Unknown keys should be ignored for forward compatibility
+        let future_format = "gst.version=2.0\ngst.future_field=some_value\ngst.pts=1000000000";
+        let zbytes = ZBytes::from(future_format.as_bytes().to_vec());
+
+        let parser = MetadataParser::parse(&zbytes).expect("Should parse with unknown keys");
+        assert_eq!(parser.version(), Some("2.0"));
+        assert_eq!(
+            parser.pts(),
+            Some(gst::ClockTime::from_nseconds(1_000_000_000))
+        );
+    }
+
+    #[test]
+    fn test_empty_metadata() {
+        let empty = "";
+        let zbytes = ZBytes::from(empty.as_bytes().to_vec());
+
+        let parser = MetadataParser::parse(&zbytes).expect("Should parse empty metadata");
+        assert!(parser.version().is_none());
+        assert!(parser.caps().is_none());
+        assert!(parser.pts().is_none());
+    }
+
+    #[test]
+    fn test_unknown_flags_ignored() {
+        // Unknown flags should be ignored
+        let flags_str = "live,discont,future_flag,another_unknown";
+        let parsed = string_to_flags(flags_str);
+
+        // Known flags should be parsed
+        assert!(parsed.contains(gst::BufferFlags::LIVE));
+        assert!(parsed.contains(gst::BufferFlags::DISCONT));
+        // Unknown flags are silently ignored (no panic)
     }
 }
