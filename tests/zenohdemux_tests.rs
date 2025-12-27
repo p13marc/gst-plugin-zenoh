@@ -1,15 +1,8 @@
 use gst::prelude::*;
 use serial_test::serial;
 
-fn init() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-
-    INIT.call_once(|| {
-        gst::init().unwrap();
-        gstzenoh::plugin_register_static().expect("Failed to register plugin");
-    });
-}
+mod common;
+use common::init;
 
 #[test]
 #[serial]
