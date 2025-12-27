@@ -69,6 +69,7 @@
 
 use gst::glib;
 use gst::prelude::*;
+use gst::subclass::prelude::ObjectSubclassIsExt;
 
 pub mod imp;
 
@@ -236,6 +237,44 @@ impl ZenohSink {
         self.set_property("send-buffer-meta", send);
     }
 
+    /// Sets a shared Zenoh session for this element.
+    ///
+    /// This allows multiple elements to share a single Zenoh session,
+    /// reducing network overhead and resource usage. The session must
+    /// be set before the element transitions to the PLAYING state.
+    ///
+    /// Note: `zenoh::Session` is internally Arc-based and Clone, so you
+    /// can simply clone the session when sharing it across multiple elements.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gstzenoh::ZenohSink;
+    /// use zenoh::Wait;
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).wait()?;
+    ///
+    /// let sink1 = ZenohSink::new("demo/video");
+    /// sink1.set_session(session.clone());
+    ///
+    /// let sink2 = ZenohSink::new("demo/audio");
+    /// sink2.set_session(session);
+    /// ```
+    pub fn set_session(&self, session: zenoh::Session) {
+        self.imp().set_external_session(session);
+    }
+
+    /// Sets the session group name for sharing sessions across elements.
+    ///
+    /// Elements with the same session-group name will share a single
+    /// Zenoh session. This is useful for gst-launch pipelines where
+    /// you can't share session objects directly.
+    ///
+    /// Must be set before the element transitions to the PLAYING state.
+    pub fn set_session_group(&self, group: &str) {
+        self.set_property("session-group", group);
+    }
+
     // -------------------------------------------------------------------------
     // Property Getters
     // -------------------------------------------------------------------------
@@ -283,6 +322,11 @@ impl ZenohSink {
     /// Returns whether buffer timing metadata is being sent.
     pub fn send_buffer_meta(&self) -> bool {
         self.property("send-buffer-meta")
+    }
+
+    /// Returns the session group name, if set.
+    pub fn session_group(&self) -> Option<String> {
+        self.property("session-group")
     }
 
     // -------------------------------------------------------------------------
@@ -366,6 +410,8 @@ pub struct ZenohSinkBuilder {
     send_caps: Option<bool>,
     caps_interval: Option<u32>,
     send_buffer_meta: Option<bool>,
+    session: Option<zenoh::Session>,
+    session_group: Option<String>,
 }
 
 impl ZenohSinkBuilder {
@@ -381,6 +427,8 @@ impl ZenohSinkBuilder {
             send_caps: None,
             caps_interval: None,
             send_buffer_meta: None,
+            session: None,
+            session_group: None,
         }
     }
 
@@ -432,6 +480,27 @@ impl ZenohSinkBuilder {
         self
     }
 
+    /// Sets a shared Zenoh session for this element.
+    ///
+    /// This allows multiple elements to share a single Zenoh session,
+    /// reducing network overhead and resource usage.
+    ///
+    /// Note: `zenoh::Session` is internally Arc-based and Clone, so you
+    /// can simply clone the session when sharing it across elements.
+    pub fn session(mut self, session: zenoh::Session) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Sets the session group name for sharing sessions across elements.
+    ///
+    /// Elements with the same session-group name will share a single
+    /// Zenoh session. This is useful for gst-launch pipelines.
+    pub fn session_group(mut self, group: &str) -> Self {
+        self.session_group = Some(group.to_string());
+        self
+    }
+
     /// Builds the ZenohSink with the configured properties.
     pub fn build(self) -> ZenohSink {
         let mut builder = gst::Object::builder::<ZenohSink>().property("key-expr", &self.key_expr);
@@ -460,8 +529,18 @@ impl ZenohSinkBuilder {
         if let Some(sbm) = self.send_buffer_meta {
             builder = builder.property("send-buffer-meta", sbm);
         }
+        if let Some(ref sg) = self.session_group {
+            builder = builder.property("session-group", sg);
+        }
 
-        builder.build().unwrap()
+        let sink: ZenohSink = builder.build().unwrap();
+
+        // Set the session directly (can't be done via properties)
+        if let Some(session) = self.session {
+            sink.set_session(session);
+        }
+
+        sink
     }
 }
 

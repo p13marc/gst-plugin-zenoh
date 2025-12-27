@@ -58,6 +58,7 @@
 
 use gst::glib;
 use gst::prelude::*;
+use gst::subclass::prelude::ObjectSubclassIsExt;
 
 pub mod imp;
 
@@ -218,6 +219,44 @@ impl ZenohSrc {
         self.set_property("apply-buffer-meta", apply);
     }
 
+    /// Sets a shared Zenoh session for this element.
+    ///
+    /// This allows multiple elements to share a single Zenoh session,
+    /// reducing network overhead and resource usage. The session must
+    /// be set before the element transitions to the PLAYING state.
+    ///
+    /// Note: `zenoh::Session` is internally Arc-based and Clone, so you
+    /// can simply clone the session when sharing it across multiple elements.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gstzenoh::ZenohSrc;
+    /// use zenoh::Wait;
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).wait()?;
+    ///
+    /// let src1 = ZenohSrc::new("demo/video");
+    /// src1.set_session(session.clone());
+    ///
+    /// let src2 = ZenohSrc::new("demo/audio");
+    /// src2.set_session(session);
+    /// ```
+    pub fn set_session(&self, session: zenoh::Session) {
+        self.imp().set_external_session(session);
+    }
+
+    /// Sets the session group name for sharing sessions across elements.
+    ///
+    /// Elements with the same session-group name will share a single
+    /// Zenoh session. This is useful for gst-launch pipelines where
+    /// you can't share session objects directly.
+    ///
+    /// Must be set before the element transitions to the PLAYING state.
+    pub fn set_session_group(&self, group: &str) {
+        self.set_property("session-group", group);
+    }
+
     // -------------------------------------------------------------------------
     // Property Getters
     // -------------------------------------------------------------------------
@@ -255,6 +294,11 @@ impl ZenohSrc {
     /// Returns whether buffer timing metadata is being applied.
     pub fn apply_buffer_meta(&self) -> bool {
         self.property("apply-buffer-meta")
+    }
+
+    /// Returns the session group name, if set.
+    pub fn session_group(&self) -> Option<String> {
+        self.property("session-group")
     }
 
     // -------------------------------------------------------------------------
@@ -329,6 +373,8 @@ pub struct ZenohSrcBuilder {
     reliability: Option<String>,
     receive_timeout_ms: Option<u64>,
     apply_buffer_meta: Option<bool>,
+    session: Option<zenoh::Session>,
+    session_group: Option<String>,
 }
 
 impl ZenohSrcBuilder {
@@ -342,6 +388,8 @@ impl ZenohSrcBuilder {
             reliability: None,
             receive_timeout_ms: None,
             apply_buffer_meta: None,
+            session: None,
+            session_group: None,
         }
     }
 
@@ -381,6 +429,27 @@ impl ZenohSrcBuilder {
         self
     }
 
+    /// Sets a shared Zenoh session for this element.
+    ///
+    /// This allows multiple elements to share a single Zenoh session,
+    /// reducing network overhead and resource usage.
+    ///
+    /// Note: `zenoh::Session` is internally Arc-based and Clone, so you
+    /// can simply clone the session when sharing it across elements.
+    pub fn session(mut self, session: zenoh::Session) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Sets the session group name for sharing sessions across elements.
+    ///
+    /// Elements with the same session-group name will share a single
+    /// Zenoh session. This is useful for gst-launch pipelines.
+    pub fn session_group(mut self, group: &str) -> Self {
+        self.session_group = Some(group.to_string());
+        self
+    }
+
     /// Builds the ZenohSrc with the configured properties.
     pub fn build(self) -> ZenohSrc {
         let mut builder = gst::Object::builder::<ZenohSrc>().property("key-expr", &self.key_expr);
@@ -403,8 +472,18 @@ impl ZenohSrcBuilder {
         if let Some(apply) = self.apply_buffer_meta {
             builder = builder.property("apply-buffer-meta", apply);
         }
+        if let Some(ref sg) = self.session_group {
+            builder = builder.property("session-group", sg);
+        }
 
-        builder.build().unwrap()
+        let src: ZenohSrc = builder.build().unwrap();
+
+        // Set the session directly (can't be done via properties)
+        if let Some(session) = self.session {
+            src.set_session(session);
+        }
+
+        src
     }
 }
 

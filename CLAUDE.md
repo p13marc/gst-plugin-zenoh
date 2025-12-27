@@ -105,6 +105,36 @@ let sink = ZenohSink::builder("demo/video")
 println!("Sent: {} bytes, {} messages", sink.bytes_sent(), sink.messages_sent());
 ```
 
+## Session Sharing
+
+Multiple elements can share a single Zenoh session to reduce network overhead:
+
+### Using session-group property (gst-launch compatible)
+
+```bash
+# Elements with same session-group share a session
+gst-launch-1.0 \
+  videotestsrc ! zenohsink key-expr=demo/video session-group=main \
+  audiotestsrc ! zenohsink key-expr=demo/audio session-group=main
+```
+
+### Using Rust API
+
+```rust
+use gstzenoh::ZenohSink;
+use zenoh::Wait;
+
+let session = zenoh::open(zenoh::Config::default()).wait()?;
+
+let sink1 = ZenohSink::builder("demo/video")
+    .session(session.clone())
+    .build();
+
+let sink2 = ZenohSink::builder("demo/audio")
+    .session(session)
+    .build();
+```
+
 ## Feature Flags
 
 | Feature | Purpose |
@@ -151,12 +181,13 @@ GST_PLUGIN_PATH=target/debug gst-inspect-1.0 zenohsrc
 
 ## Element Properties
 
-Both elements share these properties:
+All elements share these properties:
 - `key-expr` (String, required): Zenoh key expression
 - `config` (String): Path to Zenoh JSON5 config file
 - `priority` (1-7): Message priority (1=RealTime, 7=Background)
 - `reliability`: `"best-effort"` or `"reliable"`
 - `congestion-control`: `"block"` or `"drop"`
+- `session-group` (String): Session group name for sharing sessions across elements
 
 ZenohSink additional:
 - `express` (bool): Ultra-low latency mode

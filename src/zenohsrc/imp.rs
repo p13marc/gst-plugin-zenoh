@@ -47,11 +47,15 @@ struct Started {
 /// This allows the plugin to either create its own session or use
 /// a shared session provided externally, enabling session reuse
 /// across multiple GStreamer elements.
+///
+/// Note: `zenoh::Session` is internally Arc-based and Clone, so the
+/// distinction between Owned and Shared is mainly for documentation
+/// purposes - both variants use the same underlying type.
 enum SessionWrapper {
-    /// Element owns the session exclusively
+    /// Element created this session (will be dropped when element stops)
     Owned(zenoh::Session),
-    /// Element shares a session with other components
-    Shared(Arc<zenoh::Session>),
+    /// Element is using a shared session (may outlive this element)
+    Shared(zenoh::Session),
 }
 
 impl SessionWrapper {
@@ -59,7 +63,7 @@ impl SessionWrapper {
     fn as_session(&self) -> &zenoh::Session {
         match self {
             SessionWrapper::Owned(session) => session,
-            SessionWrapper::Shared(session) => session.as_ref(),
+            SessionWrapper::Shared(session) => session,
         }
     }
 }
@@ -112,8 +116,10 @@ struct Settings {
     receive_timeout_ms: u64,
     /// Apply buffer timing metadata (PTS, DTS, duration, flags) from received messages (default: true)
     apply_buffer_meta: bool,
-    /// Optional external Zenoh session to share with other elements
-    external_session: Option<Arc<zenoh::Session>>,
+    /// Optional external Zenoh session to share with other elements (Rust API)
+    external_session: Option<zenoh::Session>,
+    /// Session group name for sharing sessions via property (gst-launch compatible)
+    session_group: Option<String>,
 }
 
 impl Default for Settings {
@@ -127,6 +133,7 @@ impl Default for Settings {
             receive_timeout_ms: 100, // 100ms default for good responsiveness
             apply_buffer_meta: true, // Default to applying buffer timing metadata
             external_session: None,
+            session_group: None,
         }
     }
 }
@@ -149,6 +156,16 @@ pub struct ZenohSrc {
     settings: Mutex<Settings>,
     /// Current operational state
     state: Mutex<State>,
+}
+
+impl ZenohSrc {
+    /// Sets the external Zenoh session to use for this element.
+    ///
+    /// This is called from the public API to enable session sharing.
+    pub(crate) fn set_external_session(&self, session: zenoh::Session) {
+        let mut settings = self.settings.lock().unwrap();
+        settings.external_session = Some(session);
+    }
 }
 
 impl GstObjectImpl for ZenohSrc {}
@@ -245,6 +262,12 @@ impl ObjectImpl for ZenohSrc {
                     .default_value(true)
                     .build(),
 
+                // Session sharing property
+                glib::ParamSpecString::builder("session-group")
+                    .nick("Session Group")
+                    .blurb("Name of the session group for sharing Zenoh sessions across elements. Elements with the same group name share a single session.")
+                    .build(),
+
                 // Statistics properties (read-only)
                 glib::ParamSpecUInt64::builder("bytes-received")
                     .nick("Bytes Received")
@@ -273,7 +296,12 @@ impl ObjectImpl for ZenohSrc {
         if state.is_started()
             && matches!(
                 pspec.name(),
-                "key-expr" | "config" | "reliability" | "congestion-control" | "priority"
+                "key-expr"
+                    | "config"
+                    | "reliability"
+                    | "congestion-control"
+                    | "priority"
+                    | "session-group"
             )
         {
             gst::warning!(
@@ -350,6 +378,11 @@ impl ObjectImpl for ZenohSrc {
             "apply-buffer-meta" => {
                 settings.apply_buffer_meta = value.get::<bool>().expect("type checked upstream");
             }
+            "session-group" => {
+                settings.session_group = value
+                    .get::<Option<String>>()
+                    .expect("type checked upstream");
+            }
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
             }
@@ -360,7 +393,7 @@ impl ObjectImpl for ZenohSrc {
         match pspec.name() {
             // Configuration properties - read from settings
             "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
-            | "receive-timeout-ms" | "apply-buffer-meta" => {
+            | "receive-timeout-ms" | "apply-buffer-meta" | "session-group" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
@@ -370,6 +403,7 @@ impl ObjectImpl for ZenohSrc {
                     "reliability" => settings.reliability.to_value(),
                     "receive-timeout-ms" => settings.receive_timeout_ms.to_value(),
                     "apply-buffer-meta" => settings.apply_buffer_meta.to_value(),
+                    "session-group" => settings.session_group.to_value(),
                     _ => unreachable!(),
                 }
             }
@@ -461,6 +495,7 @@ impl BaseSrcImpl for ZenohSrc {
         let congestion_control = settings.congestion_control.clone();
         let reliability = settings.reliability.clone();
         let external_session = settings.external_session.clone();
+        let session_group = settings.session_group.clone();
         drop(settings);
 
         // Validate the key expression
@@ -471,33 +506,42 @@ impl BaseSrcImpl for ZenohSrc {
             ));
         }
 
-        // Set up Zenoh config with either default or from file
-        let config = match config_file {
-            Some(path) if !path.is_empty() => {
-                gst::debug!(CAT, "Loading Zenoh config from {}", path);
-                zenoh::Config::from_file(&path)
-                    .map_err(|e| ZenohError::InitError(e).to_error_message())?
-            }
-            _ => zenoh::Config::default(),
+        // Determine session source: external (Rust API) > session-group (property) > new session
+        let session_wrapper = if let Some(shared_session) = external_session {
+            // Priority 1: External session provided via Rust API
+            gst::debug!(CAT, "Using external shared session (Rust API)");
+            SessionWrapper::Shared(shared_session)
+        } else if let Some(ref group) = session_group {
+            // Priority 2: Session group property (gst-launch compatible)
+            gst::debug!(CAT, "Using session group '{}'", group);
+            let session = crate::session::get_or_create_session(group, config_file.as_deref())
+                .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+            SessionWrapper::Shared(session)
+        } else {
+            // Priority 3: Create a new owned session
+            gst::debug!(CAT, "Creating new Zenoh session");
+            let config = match config_file {
+                Some(path) if !path.is_empty() => {
+                    gst::debug!(CAT, "Loading Zenoh config from {}", path);
+                    zenoh::Config::from_file(&path)
+                        .map_err(|e| ZenohError::InitError(e).to_error_message())?
+                }
+                _ => zenoh::Config::default(),
+            };
+            let session = zenoh::open(config)
+                .wait()
+                .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+            SessionWrapper::Owned(session)
         };
 
-        // Use external session if provided, otherwise create a new one
-        let session_wrapper = match external_session {
-            Some(shared_session) => {
-                gst::debug!(CAT, "Using external shared session");
-                SessionWrapper::Shared(shared_session)
-            }
-            None => {
-                gst::debug!(CAT, "Creating new Zenoh session");
-                let session = zenoh::open(config)
-                    .wait()
-                    .map_err(|e| ZenohError::InitError(e).to_error_message())?;
-                SessionWrapper::Owned(session)
-            }
-        };
-
-        gst::debug!(CAT, "Creating subscriber with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'",
-                  key_expr, priority, congestion_control, reliability);
+        gst::debug!(
+            CAT,
+            "Creating subscriber with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'",
+            key_expr,
+            priority,
+            congestion_control,
+            reliability
+        );
 
         // Note: Zenoh subscriber reliability is automatically determined by the publisher
         //
@@ -889,65 +933,65 @@ impl PushSrcImpl for ZenohSrc {
 
             // Apply buffer timing metadata if enabled and available
             // This preserves PTS, DTS, duration, offset, and flags from the sender
-            if apply_buffer_meta
-                && let Some(ref metadata) = parsed_metadata {
-                    // Check if we have buffer timing metadata
-                    let has_timing = metadata.pts().is_some()
-                        || metadata.dts().is_some()
-                        || metadata.duration().is_some()
-                        || metadata.offset().is_some()
-                        || metadata.offset_end().is_some()
-                        || metadata.flags().is_some();
+            if apply_buffer_meta && let Some(ref metadata) = parsed_metadata {
+                // Check if we have buffer timing metadata
+                let has_timing = metadata.pts().is_some()
+                    || metadata.dts().is_some()
+                    || metadata.duration().is_some()
+                    || metadata.offset().is_some()
+                    || metadata.offset_end().is_some()
+                    || metadata.flags().is_some();
 
-                    if has_timing {
-                        metadata.apply_to_buffer(buffer_mut);
-                        gst::trace!(
-                            CAT,
-                            imp = self,
-                            "Applied buffer timing metadata: PTS={:?}, DTS={:?}, duration={:?}, flags={:?}",
-                            metadata.pts(),
-                            metadata.dts(),
-                            metadata.duration(),
-                            metadata.flags()
-                        );
-                    }
+                if has_timing {
+                    metadata.apply_to_buffer(buffer_mut);
+                    gst::trace!(
+                        CAT,
+                        imp = self,
+                        "Applied buffer timing metadata: PTS={:?}, DTS={:?}, duration={:?}, flags={:?}",
+                        metadata.pts(),
+                        metadata.dts(),
+                        metadata.duration(),
+                        metadata.flags()
+                    );
                 }
+            }
 
             // If no buffer timing metadata was applied, try Zenoh timestamp as fallback
             // This is useful when receiving from a sender that doesn't use buffer metadata
             if buffer_mut.pts().is_none()
-                && let Some(timestamp) = sample.timestamp() {
-                    // Zenoh timestamps are in NTP64 format (64-bit timestamp)
-                    // Convert to GStreamer ClockTime (nanoseconds since epoch)
-                    let ntp_time = timestamp.get_time();
+                && let Some(timestamp) = sample.timestamp()
+            {
+                // Zenoh timestamps are in NTP64 format (64-bit timestamp)
+                // Convert to GStreamer ClockTime (nanoseconds since epoch)
+                let ntp_time = timestamp.get_time();
 
-                    // NTP64 timestamp is split into:
-                    // - upper 32 bits: seconds since NTP epoch (Jan 1, 1900)
-                    // - lower 32 bits: fractional seconds
-                    // We need to convert this to nanoseconds since Unix epoch (Jan 1, 1970)
+                // NTP64 timestamp is split into:
+                // - upper 32 bits: seconds since NTP epoch (Jan 1, 1900)
+                // - lower 32 bits: fractional seconds
+                // We need to convert this to nanoseconds since Unix epoch (Jan 1, 1970)
 
-                    // NTP epoch is 2208988800 seconds before Unix epoch
-                    const NTP_UNIX_OFFSET: u64 = 2208988800;
+                // NTP epoch is 2208988800 seconds before Unix epoch
+                const NTP_UNIX_OFFSET: u64 = 2208988800;
 
-                    let ntp_secs = ntp_time.as_secs() as u64;
-                    let ntp_nanos = ntp_time.subsec_nanos() as u64;
+                let ntp_secs = ntp_time.as_secs() as u64;
+                let ntp_nanos = ntp_time.subsec_nanos() as u64;
 
-                    // Convert to Unix epoch
-                    if ntp_secs >= NTP_UNIX_OFFSET {
-                        let unix_secs = ntp_secs - NTP_UNIX_OFFSET;
-                        let total_nanos = unix_secs * 1_000_000_000 + ntp_nanos;
+                // Convert to Unix epoch
+                if ntp_secs >= NTP_UNIX_OFFSET {
+                    let unix_secs = ntp_secs - NTP_UNIX_OFFSET;
+                    let total_nanos = unix_secs * 1_000_000_000 + ntp_nanos;
 
-                        let pts = gst::ClockTime::from_nseconds(total_nanos);
-                        buffer_mut.set_pts(pts);
+                    let pts = gst::ClockTime::from_nseconds(total_nanos);
+                    buffer_mut.set_pts(pts);
 
-                        gst::trace!(
-                            CAT,
-                            imp = self,
-                            "Applied Zenoh timestamp to buffer: PTS = {}",
-                            pts
-                        );
-                    }
+                    gst::trace!(
+                        CAT,
+                        imp = self,
+                        "Applied Zenoh timestamp to buffer: PTS = {}",
+                        pts
+                    );
                 }
+            }
         }
 
         // Update statistics on success

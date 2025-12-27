@@ -184,6 +184,7 @@ use gst::glib;
 
 mod error;
 pub mod metadata;
+pub(crate) mod session;
 pub mod utils;
 pub mod zenohdemux;
 pub mod zenohsink;

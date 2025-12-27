@@ -80,6 +80,8 @@ struct Settings {
     pad_naming: PadNaming,
     /// Receive timeout in milliseconds
     receive_timeout_ms: u64,
+    /// Session group name for sharing sessions via property (gst-launch compatible)
+    session_group: Option<String>,
 }
 
 impl Default for Settings {
@@ -89,6 +91,7 @@ impl Default for Settings {
             config_file: None,
             pad_naming: PadNaming::FullPath,
             receive_timeout_ms: 100,
+            session_group: None,
         }
     }
 }
@@ -232,6 +235,11 @@ impl ObjectImpl for ZenohDemux {
                     .minimum(10)
                     .maximum(5000)
                     .build(),
+                // Session sharing property
+                glib::ParamSpecString::builder("session-group")
+                    .nick("Session Group")
+                    .blurb("Name of the session group for sharing Zenoh sessions across elements. Elements with the same group name share a single session.")
+                    .build(),
                 // Statistics (read-only)
                 glib::ParamSpecUInt64::builder("bytes-received")
                     .nick("Bytes Received")
@@ -272,6 +280,11 @@ impl ObjectImpl for ZenohDemux {
             "receive-timeout-ms" => {
                 settings.receive_timeout_ms = value.get::<u64>().expect("type checked upstream");
             }
+            "session-group" => {
+                settings.session_group = value
+                    .get::<Option<String>>()
+                    .expect("type checked upstream");
+            }
             name => {
                 gst::warning!(CAT, imp = self, "Unknown property: {}", name);
             }
@@ -284,6 +297,7 @@ impl ObjectImpl for ZenohDemux {
             "config" => self.settings.lock().unwrap().config_file.to_value(),
             "pad-naming" => self.settings.lock().unwrap().pad_naming.to_value(),
             "receive-timeout-ms" => self.settings.lock().unwrap().receive_timeout_ms.to_value(),
+            "session-group" => self.settings.lock().unwrap().session_group.to_value(),
             "bytes-received" => {
                 let state = self.state.lock().unwrap();
                 if let State::Started(ref started) = *state {
@@ -335,22 +349,30 @@ impl ZenohDemux {
         let config_file = settings.config_file.clone();
         let pad_naming = settings.pad_naming;
         let receive_timeout_ms = settings.receive_timeout_ms;
+        let session_group = settings.session_group.clone();
         drop(settings);
 
-        // Set up Zenoh config
-        let config = match config_file {
-            Some(path) if !path.is_empty() => {
-                gst::debug!(CAT, imp = self, "Loading Zenoh config from {}", path);
-                zenoh::Config::from_file(&path)
-                    .map_err(|e| ZenohError::InitError(e).to_error_message())?
-            }
-            _ => zenoh::Config::default(),
+        // Determine session source: session-group (property) > new session
+        let session = if let Some(ref group) = session_group {
+            // Use session group (gst-launch compatible)
+            gst::debug!(CAT, imp = self, "Using session group '{}'", group);
+            crate::session::get_or_create_session(group, config_file.as_deref())
+                .map_err(|e| ZenohError::InitError(e).to_error_message())?
+        } else {
+            // Create a new session
+            gst::debug!(CAT, imp = self, "Creating new Zenoh session");
+            let config = match config_file {
+                Some(path) if !path.is_empty() => {
+                    gst::debug!(CAT, imp = self, "Loading Zenoh config from {}", path);
+                    zenoh::Config::from_file(&path)
+                        .map_err(|e| ZenohError::InitError(e).to_error_message())?
+                }
+                _ => zenoh::Config::default(),
+            };
+            zenoh::open(config)
+                .wait()
+                .map_err(|e| ZenohError::InitError(e).to_error_message())?
         };
-
-        // Create Zenoh session
-        let session = zenoh::open(config)
-            .wait()
-            .map_err(|e| ZenohError::InitError(e).to_error_message())?;
 
         gst::debug!(
             CAT,

@@ -166,6 +166,17 @@ impl ZenohDemux {
         self.set_property("receive-timeout-ms", timeout);
     }
 
+    /// Sets the session group name for sharing sessions across elements.
+    ///
+    /// Elements with the same session-group name will share a single
+    /// Zenoh session. This is useful for gst-launch pipelines where
+    /// you can't share session objects directly.
+    ///
+    /// Must be set before the element transitions to the PLAYING state.
+    pub fn set_session_group(&self, group: &str) {
+        self.set_property("session-group", group);
+    }
+
     // -------------------------------------------------------------------------
     // Property Getters
     // -------------------------------------------------------------------------
@@ -188,6 +199,11 @@ impl ZenohDemux {
     /// Returns the receive timeout in milliseconds.
     pub fn receive_timeout_ms(&self) -> u64 {
         self.property("receive-timeout-ms")
+    }
+
+    /// Returns the session group name, if set.
+    pub fn session_group(&self) -> Option<String> {
+        self.property("session-group")
     }
 
     // -------------------------------------------------------------------------
@@ -259,6 +275,7 @@ pub struct ZenohDemuxBuilder {
     config: Option<String>,
     pad_naming: Option<PadNaming>,
     receive_timeout_ms: Option<u64>,
+    session_group: Option<String>,
 }
 
 impl ZenohDemuxBuilder {
@@ -269,6 +286,7 @@ impl ZenohDemuxBuilder {
             config: None,
             pad_naming: None,
             receive_timeout_ms: None,
+            session_group: None,
         }
     }
 
@@ -290,6 +308,15 @@ impl ZenohDemuxBuilder {
         self
     }
 
+    /// Sets the session group name for sharing sessions across elements.
+    ///
+    /// Elements with the same session-group name will share a single
+    /// Zenoh session. This is useful for gst-launch pipelines.
+    pub fn session_group(mut self, group: &str) -> Self {
+        self.session_group = Some(group.to_string());
+        self
+    }
+
     /// Builds the ZenohDemux with the configured properties.
     pub fn build(self) -> ZenohDemux {
         let mut builder = gst::Object::builder::<ZenohDemux>().property("key-expr", &self.key_expr);
@@ -302,6 +329,9 @@ impl ZenohDemuxBuilder {
         }
         if let Some(timeout) = self.receive_timeout_ms {
             builder = builder.property("receive-timeout-ms", timeout);
+        }
+        if let Some(ref sg) = self.session_group {
+            builder = builder.property("session-group", sg);
         }
 
         builder.build().unwrap()

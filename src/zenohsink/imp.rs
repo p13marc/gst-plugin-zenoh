@@ -5,9 +5,9 @@ use gst::subclass::prelude::URIHandlerImpl;
 use gst::{glib, prelude::*, subclass::prelude::*};
 use gst_base::prelude::BaseSinkExtManual;
 use gst_base::subclass::prelude::*;
+use zenoh::Wait;
 use zenoh::key_expr::OwnedKeyExpr;
 use zenoh::qos::{CongestionControl, Priority, Reliability};
-use zenoh::Wait;
 
 use crate::error::{ErrorHandling, FlowErrorHandling, ZenohError};
 use crate::metadata::MetadataBuilder;
@@ -64,11 +64,15 @@ struct Started {
 /// This allows the plugin to either create its own session or use
 /// a shared session provided externally, enabling session reuse
 /// across multiple GStreamer elements.
+///
+/// Note: `zenoh::Session` is internally Arc-based and Clone, so the
+/// distinction between Owned and Shared is mainly for documentation
+/// purposes - both variants use the same underlying type.
 enum SessionWrapper {
-    /// Element owns the session exclusively
+    /// Element created this session (will be dropped when element stops)
     Owned(zenoh::Session),
-    /// Element shares a session with other components
-    Shared(Arc<zenoh::Session>),
+    /// Element is using a shared session (may outlive this element)
+    Shared(zenoh::Session),
 }
 
 impl SessionWrapper {
@@ -76,7 +80,7 @@ impl SessionWrapper {
     fn as_session(&self) -> &zenoh::Session {
         match self {
             SessionWrapper::Owned(session) => session,
-            SessionWrapper::Shared(session) => session.as_ref(),
+            SessionWrapper::Shared(session) => session,
         }
     }
 }
@@ -146,8 +150,10 @@ struct Settings {
         feature = "compression-gzip"
     ))]
     compression_level: i32,
-    /// Optional external Zenoh session to share with other elements
-    external_session: Option<Arc<zenoh::Session>>,
+    /// Optional external Zenoh session to share with other elements (Rust API)
+    external_session: Option<zenoh::Session>,
+    /// Session group name for sharing sessions via property (gst-launch compatible)
+    session_group: Option<String>,
 }
 
 impl Default for Settings {
@@ -175,6 +181,7 @@ impl Default for Settings {
             ))]
             compression_level: 5, // Medium compression level
             external_session: None,
+            session_group: None,
         }
     }
 }
@@ -208,6 +215,16 @@ impl Default for ZenohSink {
             settings: Mutex::new(Settings::default()),
             state: Mutex::new(State::default()),
         }
+    }
+}
+
+impl ZenohSink {
+    /// Sets the external Zenoh session to use for this element.
+    ///
+    /// This is called from the public API to enable session sharing.
+    pub(crate) fn set_external_session(&self, session: zenoh::Session) {
+        let mut settings = self.settings.lock().unwrap();
+        settings.external_session = Some(session);
     }
 }
 
@@ -336,6 +353,11 @@ impl ObjectImpl for ZenohSink {
                     .minimum(1)
                     .maximum(9)
                     .build(),
+                // Session sharing property
+                glib::ParamSpecString::builder("session-group")
+                    .nick("Session Group")
+                    .blurb("Name of the session group for sharing Zenoh sessions across elements. Elements with the same group name share a single session.")
+                    .build(),
                 // Statistics properties (read-only)
                 glib::ParamSpecUInt64::builder("bytes-sent")
                     .nick("Bytes Sent")
@@ -396,6 +418,7 @@ impl ObjectImpl for ZenohSink {
                     | "reliability"
                     | "congestion-control"
                     | "priority"
+                    | "session-group"
             )
         {
             gst::warning!(
@@ -508,6 +531,11 @@ impl ObjectImpl for ZenohSink {
                     settings.compression_level = 5;
                 }
             }
+            "session-group" => {
+                settings.session_group = value
+                    .get::<Option<String>>()
+                    .expect("type checked upstream");
+            }
             name => {
                 gst::warning!(CAT, "Unknown property: {}", name);
             }
@@ -518,7 +546,7 @@ impl ObjectImpl for ZenohSink {
         match pspec.name() {
             // Configuration properties - read from settings
             "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
-            | "express" | "send-caps" | "caps-interval" | "send-buffer-meta" => {
+            | "express" | "send-caps" | "caps-interval" | "send-buffer-meta" | "session-group" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
@@ -530,6 +558,7 @@ impl ObjectImpl for ZenohSink {
                     "send-caps" => settings.send_caps.to_value(),
                     "caps-interval" => settings.caps_interval.to_value(),
                     "send-buffer-meta" => settings.send_buffer_meta.to_value(),
+                    "session-group" => settings.session_group.to_value(),
                     _ => unreachable!(),
                 }
             }
@@ -676,6 +705,7 @@ impl BaseSinkImpl for ZenohSink {
         let reliability = settings.reliability.clone();
         let express = settings.express;
         let external_session = settings.external_session.clone();
+        let session_group = settings.session_group.clone();
         drop(settings);
 
         // Validate the key expression
@@ -686,33 +716,43 @@ impl BaseSinkImpl for ZenohSink {
             ));
         }
 
-        // Set up Zenoh config with either default or from file
-        let config = match config_file {
-            Some(path) if !path.is_empty() => {
-                gst::debug!(CAT, "Loading Zenoh config from {}", path);
-                zenoh::Config::from_file(&path)
-                    .map_err(|e| ZenohError::InitError(e).to_error_message())?
-            }
-            _ => zenoh::Config::default(),
+        // Determine session source: external (Rust API) > session-group (property) > new session
+        let session_wrapper = if let Some(shared_session) = external_session {
+            // Priority 1: External session provided via Rust API
+            gst::debug!(CAT, "Using external shared session (Rust API)");
+            SessionWrapper::Shared(shared_session)
+        } else if let Some(ref group) = session_group {
+            // Priority 2: Session group property (gst-launch compatible)
+            gst::debug!(CAT, "Using session group '{}'", group);
+            let session = crate::session::get_or_create_session(group, config_file.as_deref())
+                .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+            SessionWrapper::Shared(session)
+        } else {
+            // Priority 3: Create a new owned session
+            gst::debug!(CAT, "Creating new Zenoh session");
+            let config = match config_file {
+                Some(path) if !path.is_empty() => {
+                    gst::debug!(CAT, "Loading Zenoh config from {}", path);
+                    zenoh::Config::from_file(&path)
+                        .map_err(|e| ZenohError::InitError(e).to_error_message())?
+                }
+                _ => zenoh::Config::default(),
+            };
+            let session = zenoh::open(config)
+                .wait()
+                .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+            SessionWrapper::Owned(session)
         };
 
-        // Use external session if provided, otherwise create a new one
-        let session_wrapper = match external_session {
-            Some(shared_session) => {
-                gst::debug!(CAT, "Using external shared session");
-                SessionWrapper::Shared(shared_session)
-            }
-            None => {
-                gst::debug!(CAT, "Creating new Zenoh session");
-                let session = zenoh::open(config)
-                    .wait()
-                    .map_err(|e| ZenohError::InitError(e).to_error_message())?;
-                SessionWrapper::Owned(session)
-            }
-        };
-
-        gst::debug!(CAT, "Creating publisher with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
-                  key_expr, priority, congestion_control, reliability, express);
+        gst::debug!(
+            CAT,
+            "Creating publisher with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
+            key_expr,
+            priority,
+            congestion_control,
+            reliability,
+            express
+        );
 
         // Use owned key_expr for static lifetime, with proper error handling
         let owned = OwnedKeyExpr::try_from(key_expr.clone()).map_err(|e| {
@@ -780,8 +820,15 @@ impl BaseSinkImpl for ZenohSink {
             .to_error_message()
         })?;
 
-        gst::debug!(CAT, "Publisher created with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
-            key_expr, priority, congestion_control, reliability, express);
+        gst::debug!(
+            CAT,
+            "Publisher created with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
+            key_expr,
+            priority,
+            congestion_control,
+            reliability,
+            express
+        );
 
         // Reacquire state lock to complete transition
         let mut state = self.state.lock().unwrap();
@@ -943,18 +990,19 @@ impl BaseSinkImpl for ZenohSink {
                         // Check if it's time for periodic transmission
                         let last_time = started.last_caps_time.lock().unwrap();
                         if let Some(last) = *last_time
-                            && last.elapsed().as_secs() >= caps_interval as u64 {
-                                gst::trace!(
-                                    CAT,
-                                    imp = self,
-                                    "Periodic caps transmission (interval: {}s)",
-                                    caps_interval
-                                );
-                                should_send = true;
-                                drop(last_time);
-                                *started.last_caps_time.lock().unwrap() =
-                                    Some(std::time::Instant::now());
-                            }
+                            && last.elapsed().as_secs() >= caps_interval as u64
+                        {
+                            gst::trace!(
+                                CAT,
+                                imp = self,
+                                "Periodic caps transmission (interval: {}s)",
+                                caps_interval
+                            );
+                            should_send = true;
+                            drop(last_time);
+                            *started.last_caps_time.lock().unwrap() =
+                                Some(std::time::Instant::now());
+                        }
                     }
                 }
 
@@ -1175,12 +1223,13 @@ impl BaseSinkImpl for ZenohSink {
                     } else if caps_interval > 0 {
                         let last_time = started.last_caps_time.lock().unwrap();
                         if let Some(last) = *last_time
-                            && last.elapsed().as_secs() >= caps_interval as u64 {
-                                should_send = true;
-                                drop(last_time);
-                                *started.last_caps_time.lock().unwrap() =
-                                    Some(std::time::Instant::now());
-                            }
+                            && last.elapsed().as_secs() >= caps_interval as u64
+                        {
+                            should_send = true;
+                            drop(last_time);
+                            *started.last_caps_time.lock().unwrap() =
+                                Some(std::time::Instant::now());
+                        }
                     }
                 }
 
