@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Runtime configurable**: Change compression algorithm and level during streaming
 - **Automatic decompression**: Receiver auto-detects and decompresses based on metadata
 - **Statistics**: `bytes-before-compression` and `bytes-after-compression` properties
-- **Documentation**: Comprehensive `COMPRESSION.md` guide with best practices
+- **Documentation**: Compression usage documented in element READMEs
 
 #### GStreamer Caps Transmission
 - **Automatic format negotiation**: Caps transmitted as metadata for zero-configuration receivers
@@ -30,7 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Properties**: `send-caps` (boolean), `caps-interval` (0-3600 seconds)
 - **Runtime configurable**: Toggle caps transmission and adjust interval during streaming
 - **Metadata module**: Extensible key-value metadata system (`src/metadata.rs`)
-- **Documentation**: `METADATA_FEATURES.md`, `SMART_CAPS_TRANSMISSION.md`
 
 #### Custom Metadata Support
 - **Key-value metadata API**: Attach custom metadata to streams
@@ -71,8 +70,6 @@ After thorough investigation, **dynamic QoS reconfiguration is not feasible** du
 - ✅ Compression algorithm and level
 - ✅ Caps transmission toggle and interval
 - ✅ Statistics monitoring
-
-See `DYNAMIC_RECONFIGURATION_ANALYSIS.md` for detailed findings.
 
 ## [0.1.0] - 2025-01-22
 
