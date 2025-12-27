@@ -5,6 +5,9 @@ authors = ["Marc Pardo <p13marc@gmail.com>"]
 license = "MPL-2.0"
 description = "High-performance GStreamer plugin for distributed media streaming using Zenoh protocol"
 repository = "https://github.com/p13marc/gst-plugin-zenoh.git"
+readme = "README.md"
+keywords = ["gstreamer", "zenoh", "streaming", "multimedia", "pubsub"]
+categories = ["multimedia::video", "network-programming"]
 edition = "2024"
 
 [lib]
