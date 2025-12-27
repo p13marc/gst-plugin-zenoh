@@ -97,6 +97,11 @@ gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video compression=zstd
 gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 ```
 
+## Requirements
+
+- Rust 1.85+ (edition 2024)
+- GStreamer 1.20+
+
 ## License
 
 Mozilla Public License 2.0 - see [LICENSE](LICENSE).

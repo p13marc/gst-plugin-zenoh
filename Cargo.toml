@@ -10,6 +10,7 @@ readme = "README.md"
 keywords = ["gstreamer", "zenoh", "streaming", "multimedia", "pubsub"]
 categories = ["multimedia::video", "network-programming"]
 edition = "2024"
+rust-version = "1.85"
 exclude = ["/.github", "/examples", "CLAUDE.md"]
 
 [lib]
