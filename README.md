@@ -222,6 +222,78 @@ gst-inspect-1.0 zenohsink | grep bytes-
 - **LZ4**: Choose when CPU is limited or ultra-low latency is critical
 - **Gzip**: Use for compatibility with non-Rust receivers
 
+## 🦀 Strongly-Typed Rust API
+
+When using the plugin as a Rust crate, you get access to strongly-typed wrappers for all elements. Main types are re-exported at the crate root for convenience:
+
+```rust
+use gstzenoh::{ZenohSink, ZenohSinkBuilder, ZenohSrc, ZenohSrcBuilder, ZenohDemux, ZenohDemuxBuilder, PadNaming};
+```
+
+### Creating Elements
+
+```rust
+use gstzenoh::{ZenohSink, ZenohSrc, ZenohDemux, PadNaming};
+
+// Simple constructors
+let sink = ZenohSink::new("demo/video");
+let src = ZenohSrc::new("demo/video");
+let demux = ZenohDemux::new("sensors/**");
+
+// Builder pattern for full configuration
+let sink = ZenohSink::builder("demo/video")
+    .reliability("reliable")
+    .priority(2)
+    .express(true)
+    .send_caps(true)
+    .build();
+
+let src = ZenohSrc::builder("demo/video")
+    .receive_timeout_ms(500)
+    .apply_buffer_meta(true)
+    .build();
+
+let demux = ZenohDemux::builder("sensors/**")
+    .pad_naming(PadNaming::LastSegment)
+    .build();
+```
+
+### Typed Setters and Getters
+
+```rust
+// Configuration with typed setters
+sink.set_key_expr("demo/video");
+sink.set_reliability("reliable");
+sink.set_priority(2);
+sink.set_express(true);
+
+// Read configuration with typed getters
+let key: String = sink.key_expr();
+let priority: i32 = sink.priority();
+let express: bool = sink.express();
+
+// Access statistics
+let bytes: u64 = sink.bytes_sent();
+let messages: u64 = sink.messages_sent();
+let errors: u64 = sink.errors();
+```
+
+### Converting from gst::Element
+
+```rust
+use std::convert::TryFrom;
+use gstzenoh::ZenohSink;
+
+// When you have a gst::Element from a pipeline
+let element: gst::Element = pipeline.by_name("sink").unwrap();
+
+// Convert to strongly-typed wrapper
+let sink = ZenohSink::try_from(element).expect("Should be a ZenohSink");
+
+// Now use typed methods
+println!("Bytes sent: {}", sink.bytes_sent());
+```
+
 ## 📊 Statistics Monitoring
 
 Both `zenohsink` and `zenohsrc` provide real-time statistics for monitoring performance and debugging issues. All statistics properties are read-only and thread-safe.
@@ -267,38 +339,37 @@ kill $PIPELINE_PID
 
 ```rust
 use gst::prelude::*;
+use gstzenoh::ZenohSink;
 
-// Create pipeline with named sink
-let pipeline = gst::parse_launch(
-    "videotestsrc ! zenohsink name=sink key-expr=demo/monitor"
-)?;
+// Create sink using the strongly-typed API
+let sink = ZenohSink::builder("demo/monitor")
+    .reliability("reliable")
+    .priority(2)
+    .build();
 
-// Get the zenohsink element
-let sink = pipeline
-    .by_name("sink")
-    .expect("Could not find sink element");
+// Build pipeline
+let pipeline = gst::Pipeline::new();
+let src = gst::ElementFactory::make("videotestsrc").build().unwrap();
+pipeline.add_many([&src, sink.upcast_ref()]).unwrap();
+src.link(&sink).unwrap();
 
 // Start pipeline
-pipeline.set_state(gst::State::Playing)?;
+pipeline.set_state(gst::State::Playing).unwrap();
 
-// Monitor statistics periodically
+// Monitor statistics using typed getters
 loop {
     std::thread::sleep(std::time::Duration::from_secs(1));
     
-    let bytes_sent: u64 = sink.property("bytes-sent");
-    let messages_sent: u64 = sink.property("messages-sent");
-    let errors: u64 = sink.property("errors");
-    let dropped: u64 = sink.property("dropped");
-    
     println!("Stats: {} bytes, {} msgs, {} errors, {} dropped",
-             bytes_sent, messages_sent, errors, dropped);
+             sink.bytes_sent(), sink.messages_sent(), 
+             sink.errors(), sink.dropped());
     
-    if messages_sent >= 1000 {
+    if sink.messages_sent() >= 1000 {
         break;
     }
 }
 
-pipeline.set_state(gst::State::Null)?;
+pipeline.set_state(gst::State::Null).unwrap();
 ```
 
 ## 🔗 URI Handler Support
@@ -368,23 +439,22 @@ gst-launch-1.0 videotestsrc ! \
 
 ```rust
 use gst::prelude::*;
+use gstzenoh::ZenohSink;
 
-// Create element and set URI
-let sink = gst::ElementFactory::make("zenohsink").build()?;
+// Using the strongly-typed builder (recommended)
+let sink = ZenohSink::builder("demo/video")
+    .priority(2)
+    .reliability("reliable")
+    .build();
 
-// Set URI using URIHandler interface
-if let Some(uri_handler) = sink.dynamic_cast_ref::<gst::URIHandler>() {
-    uri_handler.set_uri("zenoh:demo/video?priority=2&reliability=reliable")?;
+// Or use the URI handler interface
+let sink2 = ZenohSink::new("demo/video");
+if let Some(uri_handler) = sink2.dynamic_cast_ref::<gst::URIHandler>() {
+    uri_handler.set_uri("zenoh:demo/video?priority=2&reliability=reliable").unwrap();
 }
 
-// Or use the uri property directly
-sink.set_property("uri", "zenoh:demo/video?priority=2&reliability=reliable");
-
-// Read back current URI
-if let Some(uri_handler) = sink.dynamic_cast_ref::<gst::URIHandler>() {
-    let current_uri = uri_handler.uri();
-    println!("Current URI: {:?}", current_uri);
-}
+// Read back current configuration using typed getters
+println!("Key: {}, Priority: {}", sink.key_expr(), sink.priority());
 ```
 
 ## ⚙️ Element Properties

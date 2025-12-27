@@ -23,32 +23,41 @@ The GStreamer Zenoh plugin enables GStreamer pipelines to send and receive media
 - **Automatic discovery**: Dynamic peer discovery and routing
 - **Quality of Service**: Configurable reliability, priority, and congestion control
 
-The plugin consists of two main elements:
+The plugin consists of three main elements:
 - **`zenohsink`**: Publishes GStreamer data to Zenoh network
 - **`zenohsrc`**: Subscribes to Zenoh data and provides it to GStreamer pipelines
+- **`zenohdemux`**: Demultiplexes Zenoh streams by key expression, creating dynamic source pads
 
 ## Plugin Structure
 
 ```
 src/
-├── lib.rs                  # Plugin registration and entry point
+├── lib.rs                  # Plugin registration, entry point, and re-exports
 ├── utils.rs                # Shared utilities and runtime management
 ├── error.rs                # Error types and handling
+├── metadata.rs             # Buffer metadata transmission (PTS, DTS, duration, flags)
+├── compression.rs          # Optional compression support (zstd, lz4, gzip)
 ├── zenohsink/
-│   ├── mod.rs             # ZenohSink element definition and registration
+│   ├── mod.rs             # ZenohSink element definition, registration, and public API
 │   └── imp.rs             # ZenohSink implementation (BaseSink)
-└── zenohsrc/
-    ├── mod.rs             # ZenohSrc element definition and registration
-    └── imp.rs             # ZenohSrc implementation (PushSrc)
+├── zenohsrc/
+│   ├── mod.rs             # ZenohSrc element definition, registration, and public API
+│   └── imp.rs             # ZenohSrc implementation (PushSrc)
+└── zenohdemux/
+    ├── mod.rs             # ZenohDemux element definition, registration, and public API
+    └── imp.rs             # ZenohDemux implementation (Element with dynamic pads)
 ```
 
 ### Module Responsibilities
 
-- **`lib.rs`**: Plugin entry point, registers elements with GStreamer
+- **`lib.rs`**: Plugin entry point, registers elements with GStreamer, re-exports main types
 - **`utils.rs`**: Shared utilities, currently minimal but extensible
 - **`error.rs`**: Centralized error handling with domain-specific error types
+- **`metadata.rs`**: Buffer metadata serialization/deserialization for timing preservation
+- **`compression.rs`**: Optional compression algorithms (feature-gated)
 - **`zenohsink/`**: Sink element that publishes data to Zenoh
 - **`zenohsrc/`**: Source element that receives data from Zenoh
+- **`zenohdemux/`**: Demultiplexer element with dynamic source pads per key expression
 
 ## Component Architecture
 
@@ -85,6 +94,29 @@ Network → Zenoh Subscriber → Zenoh Session → ZenohSrc → GStreamer Pipeli
 **State Transitions:**
 - `Stopped` → `Started`: Creates Zenoh session and subscriber
 - `Started` → `Stopped`: Cleans up resources (automatic via Drop)
+
+### ZenohDemux Architecture
+
+```
+Network → Zenoh Subscriber → ZenohDemux → Dynamic Source Pads → GStreamer Pipeline(s)
+```
+
+**Key Components:**
+
+1. **Element Implementation**: Extends `gst::Element` for dynamic pad management
+2. **Settings**: Thread-safe configuration storage (`Mutex<Settings>`)
+3. **State**: Runtime state with pad tracking (`Mutex<State>`)
+4. **Dynamic Pads**: Creates source pads per unique key expression
+5. **Receiver Thread**: Background thread for Zenoh subscription processing
+
+**State Transitions:**
+- `Stopped` → `Started`: Creates Zenoh session, subscriber, and receiver thread
+- `Started` → `Stopped`: Signals thread shutdown, cleans up resources
+
+**Pad Naming Strategies:**
+- `full-path`: Uses complete key expression as pad name
+- `last-segment`: Uses only the last segment of the key expression
+- `hash`: Uses a hash of the key expression for compact names
 
 ## Data Flow
 
@@ -126,6 +158,29 @@ graph LR
 4. Sample payload is extracted as bytes
 5. New `gst::Buffer` is created with payload data
 6. Buffer is passed to downstream GStreamer elements
+
+### Demux Data Flow
+
+```mermaid
+graph LR
+    A[Zenoh Network] --> B[Zenoh Subscriber]
+    B --> C[Receiver Thread]
+    C --> D{Key Expression}
+    D --> E1[Pad: stream/1]
+    D --> E2[Pad: stream/2]
+    D --> E3[Pad: stream/N]
+    E1 --> F1[Downstream 1]
+    E2 --> F2[Downstream 2]
+    E3 --> F3[Downstream N]
+```
+
+**Steps:**
+1. Zenoh subscriber receives samples with different key expressions
+2. Receiver thread processes incoming samples
+3. For each unique key expression, a new source pad is created dynamically
+4. Sample payload is extracted and wrapped in `gst::Buffer`
+5. Buffer is pushed to the corresponding source pad
+6. Each downstream pipeline receives only its relevant data
 
 ## State Management
 
@@ -260,6 +315,7 @@ The plugin uses a **simplified synchronous model**:
 fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
     zenohsink::register(plugin)?;
     zenohsrc::register(plugin)?;
+    zenohdemux::register(plugin)?;
     Ok(())
 }
 ```
@@ -267,6 +323,7 @@ fn plugin_init(plugin: &gst::Plugin) -> Result<(), glib::BoolError> {
 **Base Class Integration:**
 - `zenohsink`: Extends `gst_base::BaseSink`
 - `zenohsrc`: Extends `gst_base::PushSrc`
+- `zenohdemux`: Extends `gst::Element` (for dynamic pad support)
 
 ### Zenoh Integration
 
@@ -295,6 +352,61 @@ let sample = subscriber.recv()?;
 - **No Negotiation**: Pass-through caps handling
 - **Format Preservation**: Raw byte transmission preserves all data
 
+## Strongly-Typed Rust API
+
+The plugin provides a strongly-typed Rust API for programmatic use, in addition to the standard GStreamer property-based API.
+
+### Main Types
+
+All main types are re-exported at the crate root for convenience:
+
+```rust
+use gstzenoh::{ZenohSink, ZenohSinkBuilder, ZenohSrc, ZenohSrcBuilder, ZenohDemux, ZenohDemuxBuilder, PadNaming};
+```
+
+### Construction Patterns
+
+**Simple Constructor:**
+```rust
+let sink = ZenohSink::new("demo/video");
+```
+
+**Builder Pattern:**
+```rust
+let sink = ZenohSink::builder("demo/video")
+    .reliability("reliable")
+    .priority(5)
+    .express(true)
+    .build();
+```
+
+### Typed Getters and Setters
+
+Each element provides typed methods instead of requiring property strings:
+
+```rust
+// Setters
+sink.set_key_expr("demo/video");
+sink.set_reliability("reliable");
+sink.set_express(true);
+
+// Getters
+let key: String = sink.key_expr();
+let bytes: u64 = sink.bytes_sent();
+let messages: u64 = sink.messages_sent();
+```
+
+### Type Conversion
+
+Convert from `gst::Element` to strongly-typed wrapper:
+
+```rust
+use std::convert::TryFrom;
+
+let element: gst::Element = /* ... */;
+let sink = ZenohSink::try_from(element).expect("Should be a ZenohSink");
+```
+
 ## Usage Patterns
 
 ### Basic Pipeline
@@ -317,6 +429,14 @@ gst-launch-1.0 videotestsrc ! videoconvert ! x264enc ! \
 # With decoding
 gst-launch-1.0 zenohsrc key-expr=encoded/video ! \
   decodebin ! videoconvert ! autovideosink
+```
+
+### Demultiplexing Multiple Streams
+
+```bash
+# Subscribe to wildcard pattern and demux by key expression
+gst-launch-1.0 zenohdemux key-expr="sensors/**" pad-naming=last-segment ! \
+  queue ! filesink location=sensor_data.bin
 ```
 
 ### Configuration Examples
@@ -360,8 +480,10 @@ gst-launch-1.0 videotestsrc ! \
 ```
 tests/
 ├── plugin_tests.rs        # Basic plugin functionality
-├── error_tests.rs         # Error handling scenarios  
-└── integration_tests.rs   # Cross-element integration
+├── integration_tests.rs   # Cross-element integration
+├── uri_handler_tests.rs   # URI parsing, buffer metadata properties
+├── statistics_tests.rs    # Statistics properties
+└── zenohdemux_tests.rs    # Demux element tests
 ```
 
 ### Test Categories

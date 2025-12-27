@@ -41,19 +41,19 @@ cargo clippy -- -D warnings
 
 ```
 src/
-├── lib.rs              # Plugin registration entry point
+├── lib.rs              # Plugin registration entry point, re-exports main types
 ├── utils.rs            # Shared utilities
 ├── error.rs            # ZenohError type with thiserror
 ├── metadata.rs         # Caps/metadata transmission helpers (includes buffer timing)
 ├── compression.rs      # Optional compression (zstd/lz4/gzip)
 ├── zenohsink/
-│   ├── mod.rs          # Element registration
+│   ├── mod.rs          # Element registration and strongly-typed API (ZenohSink, ZenohSinkBuilder)
 │   └── imp.rs          # BaseSink implementation
 ├── zenohsrc/
-│   ├── mod.rs          # Element registration
+│   ├── mod.rs          # Element registration and strongly-typed API (ZenohSrc, ZenohSrcBuilder)
 │   └── imp.rs          # PushSrc implementation
 └── zenohdemux/
-    ├── mod.rs          # Element registration
+    ├── mod.rs          # Element registration and strongly-typed API (ZenohDemux, ZenohDemuxBuilder, PadNaming)
     └── imp.rs          # Element implementation with dynamic pads
 ```
 
@@ -74,6 +74,36 @@ src/
 - **Buffer Metadata**: PTS, DTS, duration, offset, and flags can be transmitted via Zenoh attachments (`send-buffer-meta` on sink, `apply-buffer-meta` on src/demux). Uses `metadata.rs` with versioned format (v1.0).
 
 - **Zero-Copy Optimization**: When compression is disabled, `render()` uses `Cow::Borrowed` to avoid copying buffer data.
+
+## Strongly-Typed Rust API
+
+Main types are re-exported at crate root for convenience:
+
+```rust
+use gstzenoh::{ZenohSink, ZenohSinkBuilder, ZenohSrc, ZenohSrcBuilder, ZenohDemux, ZenohDemuxBuilder, PadNaming};
+```
+
+Each element provides:
+- **Constructor**: `ZenohSink::new("key-expr")` - creates element with required key expression
+- **Builder**: `ZenohSink::builder("key-expr").reliability("reliable").build()` - fluent configuration
+- **Typed setters**: `sink.set_reliability("reliable")`, `sink.set_priority(2)`
+- **Typed getters**: `sink.key_expr()`, `sink.bytes_sent()`, `sink.messages_sent()`
+- **TryFrom conversion**: `ZenohSink::try_from(element)` - convert from `gst::Element`
+
+Example:
+
+```rust
+use gstzenoh::ZenohSink;
+
+let sink = ZenohSink::builder("demo/video")
+    .reliability("reliable")
+    .priority(2)
+    .express(true)
+    .build();
+
+// Access statistics with typed getters
+println!("Sent: {} bytes, {} messages", sink.bytes_sent(), sink.messages_sent());
+```
 
 ## Feature Flags
 
