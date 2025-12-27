@@ -23,28 +23,62 @@
 //!
 //! ## Usage
 //!
-//! ### Using the Rust API
+//! ### Strongly-Typed API (Recommended)
 //!
-//! Create elements programmatically with full type safety:
+//! Use the builder pattern for type-safe element creation:
 //!
 //! ```no_run
 //! use gst::prelude::*;
+//! use gstzenoh::zenohsink::ZenohSink;
+//! use gstzenoh::zenohsrc::ZenohSrc;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     gst::init()?;
 //!     gstzenoh::plugin_register_static()?;
 //!
-//!     // Create a pipeline with zenohsink
+//!     // Create ZenohSink with the builder pattern
+//!     let sink = ZenohSink::builder("demo/video")
+//!         .reliability("reliable")
+//!         .priority(2)  // InteractiveHigh
+//!         .express(true)
+//!         .send_caps(true)
+//!         .build();
+//!
+//!     // Or use new() and setters
+//!     let src = ZenohSrc::new("demo/video");
+//!     src.set_receive_timeout_ms(500);
+//!     src.set_apply_buffer_meta(true);
+//!
+//!     // Access statistics with typed getters
+//!     println!("Bytes sent: {}", sink.bytes_sent());
+//!     println!("Messages received: {}", src.messages_received());
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ### Building Pipelines with Strongly-Typed Elements
+//!
+//! ```no_run
+//! use gst::prelude::*;
+//! use gstzenoh::zenohsink::ZenohSink;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     gst::init()?;
+//!     gstzenoh::plugin_register_static()?;
+//!
 //!     let pipeline = gst::Pipeline::new();
 //!     let src = gst::ElementFactory::make("videotestsrc").build()?;
-//!     let sink = gst::ElementFactory::make("zenohsink")
-//!         .property("key-expr", "demo/video")
-//!         .property("reliability", "reliable")
-//!         .property("priority", 2i32)  // InteractiveHigh
-//!         .property("express", true)
-//!         .build()?;
 //!
-//!     pipeline.add_many([&src, &sink])?;
+//!     // Create sink with strongly-typed API
+//!     let sink = ZenohSink::builder("demo/video")
+//!         .reliability("reliable")
+//!         .priority(2)
+//!         .express(true)
+//!         .build();
+//!
+//!     // Add to pipeline (upcast to Element)
+//!     pipeline.add_many([&src, sink.upcast_ref()])?;
 //!     src.link(&sink)?;
 //!
 //!     pipeline.set_state(gst::State::Playing)?;
@@ -54,7 +88,35 @@
 //! }
 //! ```
 //!
-//! ### Receiving data with zenohsrc
+//! ### Converting from Generic Elements
+//!
+//! ```no_run
+//! use gst::prelude::*;
+//! use gstzenoh::zenohsink::ZenohSink;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     gst::init()?;
+//!     gstzenoh::plugin_register_static()?;
+//!
+//!     // Create via ElementFactory
+//!     let element = gst::ElementFactory::make("zenohsink")
+//!         .property("key-expr", "demo/video")
+//!         .build()?;
+//!
+//!     // Convert to strongly-typed wrapper
+//!     let sink = ZenohSink::try_from(element).expect("Should be a ZenohSink");
+//!
+//!     // Now use typed API
+//!     sink.set_reliability("reliable");
+//!     println!("Key expression: {}", sink.key_expr());
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ### Using the Generic Property API
+//!
+//! For compatibility or dynamic configuration:
 //!
 //! ```no_run
 //! use gst::prelude::*;
@@ -63,25 +125,18 @@
 //!     gst::init()?;
 //!     gstzenoh::plugin_register_static()?;
 //!
-//!     let pipeline = gst::Pipeline::new();
-//!     let src = gst::ElementFactory::make("zenohsrc")
+//!     let sink = gst::ElementFactory::make("zenohsink")
 //!         .property("key-expr", "demo/video")
-//!         .property("receive-timeout-ms", 5000i32)
+//!         .property("reliability", "reliable")
+//!         .property("priority", 2u32)
+//!         .property("express", true)
 //!         .build()?;
-//!     let convert = gst::ElementFactory::make("videoconvert").build()?;
-//!     let sink = gst::ElementFactory::make("autovideosink").build()?;
 //!
-//!     pipeline.add_many([&src, &convert, &sink])?;
-//!     gst::Element::link_many([&src, &convert, &sink])?;
-//!
-//!     pipeline.set_state(gst::State::Playing)?;
-//!     // ... run pipeline ...
-//!     pipeline.set_state(gst::State::Null)?;
 //!     Ok(())
 //! }
 //! ```
 //!
-//! ### Using parse_launch for quick prototyping
+//! ### Using parse_launch for Quick Prototyping
 //!
 //! ```no_run
 //! use gst::prelude::*;
