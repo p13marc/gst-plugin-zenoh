@@ -5,6 +5,27 @@ All notable changes to gst-plugin-zenoh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2025-12-27
+
+### Added
+
+- **Linux packaging support**: Build distributable packages for multiple Linux distributions
+  - `.deb` packages for Debian/Ubuntu
+  - `.rpm` packages for Fedora/RHEL/Oracle Linux
+  - Binary tarballs with install scripts for any Linux
+  - Source tarballs for building from source
+- **Build scripts** (`scripts/`): Local package building without CI
+  - `build-tarball.sh`, `build-source-tarball.sh`
+  - `build-deb.sh`, `build-rpm.sh`
+  - `build-packages.sh` (orchestration)
+  - `docker-build.sh` (cross-distribution builds via Docker/Podman)
+- **Dockerfiles** for Debian 12, Ubuntu 24.04, Fedora 41, Oracle Linux 9
+- **GitHub Actions release workflow**: Automatic package builds on version tags
+
+### Changed
+
+- Release tags now use `X.Y.Z` format (no `v` prefix)
+
 ## [0.3.0] - 2025-12-27
 
 ### Added

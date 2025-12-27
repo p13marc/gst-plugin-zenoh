@@ -22,8 +22,8 @@ if [ -d .git ]; then
     git archive --format=tar.gz --prefix="${PACKAGE_NAME}/" -o "$TARBALL" HEAD
     echo ""
     echo "Source tarball created: $TARBALL"
-    echo "Contents:"
-    tar -tzf "$TARBALL" | head -20
+    echo "Contents (first 20 entries):"
+    tar -tzf "$TARBALL" | head -20 || true
     echo "..."
 else
     # Fallback: manual collection

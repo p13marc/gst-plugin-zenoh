@@ -3,11 +3,11 @@ name: Release Packages
 on:
   push:
     tags:
-      - 'v*'
+      - "[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to build (e.g., 0.3.0)'
+        description: "Version to build (e.g., 0.3.0)"
         required: false
         type: string
 
@@ -34,7 +34,9 @@ jobs:
           sudo apt-get install -y libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Install cargo-deb
         run: cargo install cargo-deb
@@ -114,7 +116,9 @@ jobs:
           sudo apt-get install -y libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
 
       - name: Make scripts executable
         run: chmod +x scripts/*.sh
