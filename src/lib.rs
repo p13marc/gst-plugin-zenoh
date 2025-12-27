@@ -25,12 +25,12 @@
 //!
 //! ### Strongly-Typed API (Recommended)
 //!
-//! Use the builder pattern for type-safe element creation:
+//! Use the builder pattern for type-safe element creation.
+//! Main types are re-exported at the crate root for convenience:
 //!
 //! ```no_run
 //! use gst::prelude::*;
-//! use gstzenoh::zenohsink::ZenohSink;
-//! use gstzenoh::zenohsrc::ZenohSrc;
+//! use gstzenoh::{ZenohSink, ZenohSrc};
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     gst::init()?;
@@ -61,7 +61,7 @@
 //!
 //! ```no_run
 //! use gst::prelude::*;
-//! use gstzenoh::zenohsink::ZenohSink;
+//! use gstzenoh::ZenohSink;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     gst::init()?;
@@ -92,7 +92,7 @@
 //!
 //! ```no_run
 //! use gst::prelude::*;
-//! use gstzenoh::zenohsink::ZenohSink;
+//! use gstzenoh::ZenohSink;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     gst::init()?;
@@ -189,6 +189,11 @@ pub mod utils;
 pub mod zenohdemux;
 pub mod zenohsink;
 pub mod zenohsrc;
+
+// Re-export main types at crate root for convenience
+pub use zenohdemux::{PadNaming, ZenohDemux, ZenohDemuxBuilder};
+pub use zenohsink::{ZenohSink, ZenohSinkBuilder};
+pub use zenohsrc::{ZenohSrc, ZenohSrcBuilder};
 
 #[cfg(any(
     feature = "compression-zstd",
