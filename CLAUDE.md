@@ -217,3 +217,73 @@ sudo apt-get install libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base
 # Fedora
 sudo dnf install libunwind-devel gstreamer1-devel gstreamer1-plugins-base-devel
 ```
+
+## Packaging
+
+The project supports building distributable packages for various Linux distributions.
+
+### Building Packages Locally
+
+```bash
+# Build binary tarball (works on any Linux)
+./scripts/build-tarball.sh
+
+# Build source tarball
+./scripts/build-source-tarball.sh
+
+# Build RPM (on Fedora/RHEL)
+./scripts/build-rpm.sh
+
+# Build .deb (on Debian/Ubuntu)
+./scripts/build-deb.sh
+
+# Build all packages
+./scripts/build-packages.sh --all
+```
+
+### Cross-Building with Docker
+
+```bash
+# Build .deb in Debian container
+./scripts/docker-build.sh debian
+
+# Build .deb in Ubuntu container
+./scripts/docker-build.sh ubuntu
+
+# Build .rpm in Fedora container
+./scripts/docker-build.sh fedora
+
+# Build .rpm in Oracle Linux container
+./scripts/docker-build.sh oracle
+
+# Build all packages
+./scripts/docker-build.sh all
+```
+
+### Package Output
+
+All packages are written to the `dist/` directory:
+- `gst-plugin-zenoh-VERSION-linux-ARCH.tar.gz` - Binary tarball
+- `gst-plugin-zenoh-VERSION-src.tar.gz` - Source tarball
+- `gst-plugin-zenoh_VERSION_amd64.deb` - Debian/Ubuntu package
+- `gst-plugin-zenoh-VERSION.x86_64.rpm` - Fedora/RHEL/Oracle package
+
+### Installing from Packages
+
+```bash
+# Debian/Ubuntu
+sudo dpkg -i dist/gst-plugin-zenoh_*.deb
+
+# Fedora/RHEL/Oracle
+sudo rpm -i dist/gst-plugin-zenoh-*.rpm
+
+# Binary tarball
+tar xzf dist/gst-plugin-zenoh-*-linux-*.tar.gz
+cd gst-plugin-zenoh-*/
+./install.sh
+```
+
+### GitHub Releases
+
+Tagged releases (v*) automatically build and publish packages via GitHub Actions.
+See `.github/workflows/release.yml` for the release workflow.

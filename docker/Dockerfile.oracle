@@ -1,0 +1,32 @@
+# Dockerfile for building gst-plugin-zenoh on Oracle Linux 9
+FROM oraclelinux:9
+
+# Enable EPEL and CodeReady Builder for additional packages
+RUN dnf install -y oracle-epel-release-el9 && \
+    dnf config-manager --set-enabled ol9_codeready_builder
+
+# Install system dependencies
+RUN dnf install -y \
+    gcc \
+    pkg-config \
+    libunwind-devel \
+    gstreamer1-devel \
+    gstreamer1-plugins-base-devel \
+    && dnf clean all
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install cargo-generate-rpm
+RUN cargo install cargo-generate-rpm
+
+# Set working directory
+WORKDIR /build
+
+# Build script
+COPY build-in-container.sh /build-in-container.sh
+RUN chmod +x /build-in-container.sh
+
+# Entry point
+CMD ["/build-in-container.sh", "rpm"]

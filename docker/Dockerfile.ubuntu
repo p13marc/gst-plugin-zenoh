@@ -1,0 +1,32 @@
+# Dockerfile for building gst-plugin-zenoh on Ubuntu 24.04 LTS
+FROM ubuntu:24.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    pkg-config \
+    libunwind-dev \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install cargo-deb
+RUN cargo install cargo-deb
+
+# Set working directory
+WORKDIR /build
+
+# Build script
+COPY build-in-container.sh /build-in-container.sh
+RUN chmod +x /build-in-container.sh
+
+# Entry point
+CMD ["/build-in-container.sh", "deb"]

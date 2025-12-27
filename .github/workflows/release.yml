@@ -1,0 +1,159 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 0.3.0)'
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build Debian packages on Ubuntu runners
+  build-deb:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: ubuntu22.04
+          - os: ubuntu-24.04
+            name: ubuntu24.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build release binary
+        run: cargo build --release --features compression
+
+      - name: Build .deb package
+        run: cargo deb --no-build
+
+      - name: Rename package with distro suffix
+        run: |
+          cd target/debian
+          for f in *.deb; do
+            mv "$f" "${f%.deb}-${{ matrix.name }}.deb"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.name }}
+          path: target/debian/*.deb
+
+  # Build RPM packages using Fedora container
+  build-rpm-fedora:
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dnf install -y gcc pkg-config libunwind-devel gstreamer1-devel gstreamer1-plugins-base-devel
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install cargo-generate-rpm
+        run: |
+          source $HOME/.cargo/env
+          cargo install cargo-generate-rpm
+
+      - name: Build release binary
+        run: |
+          source $HOME/.cargo/env
+          cargo build --release --features compression
+
+      - name: Build .rpm package
+        run: |
+          source $HOME/.cargo/env
+          cargo generate-rpm
+
+      - name: Rename package with distro suffix
+        run: |
+          cd target/generate-rpm
+          for f in *.rpm; do
+            mv "$f" "${f%.rpm}-fc41.rpm"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-fedora41
+          path: target/generate-rpm/*.rpm
+
+  # Build binary tarball
+  build-tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Build binary tarball
+        run: ./scripts/build-tarball.sh
+
+      - name: Build source tarball
+        run: ./scripts/build-source-tarball.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarballs
+          path: dist/*.tar.gz
+
+  # Create GitHub Release with all artifacts
+  release:
+    needs: [build-deb, build-rpm-fedora, build-tarball]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.rpm
+            artifacts/**/*.tar.gz

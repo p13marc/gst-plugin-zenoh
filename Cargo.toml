@@ -52,3 +52,35 @@ compression = ["compression-zstd", "compression-lz4", "compression-gzip"]
 
 [package.metadata.docs.rs]
 all-features = true
+
+# Debian/Ubuntu packaging configuration (cargo-deb)
+[package.metadata.deb]
+maintainer = "Marc Pardo <p13marc@gmail.com>"
+copyright = "2024-2025, Marc Pardo <p13marc@gmail.com>"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+GStreamer plugin for distributed media streaming using Zenoh protocol.
+Provides zenohsink, zenohsrc, and zenohdemux elements for publishing
+and subscribing to media streams over Zenoh networks."""
+depends = "libgstreamer1.0-0 (>= 1.20), libgstreamer-plugins-base1.0-0 (>= 1.20)"
+section = "libs"
+priority = "optional"
+assets = [
+    ["target/release/libgstzenoh.so", "usr/lib/x86_64-linux-gnu/gstreamer-1.0/", "755"],
+    ["README.md", "usr/share/doc/gst-plugin-zenoh/", "644"],
+    ["LICENSE", "usr/share/doc/gst-plugin-zenoh/", "644"],
+    ["CHANGELOG.md", "usr/share/doc/gst-plugin-zenoh/", "644"],
+]
+
+# RPM packaging configuration (cargo-generate-rpm)
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/libgstzenoh.so", dest = "/usr/lib64/gstreamer-1.0/libgstzenoh.so", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/gst-plugin-zenoh/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/gst-plugin-zenoh/LICENSE", mode = "644", doc = true },
+    { source = "CHANGELOG.md", dest = "/usr/share/doc/gst-plugin-zenoh/CHANGELOG.md", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+gstreamer1 = ">= 1.20"
+gstreamer1-plugins-base = ">= 1.20"
