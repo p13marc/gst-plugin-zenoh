@@ -260,13 +260,13 @@ pub enum ZenohError {
 
 ### Property System
 
-Both elements expose identical properties for consistency:
+All elements expose common properties for consistency:
 
 | Property | Type | Description | Default |
 |----------|------|-------------|---------|
 | `key-expr` | String | Zenoh key expression | `""` (required) |
 | `config` | String | Zenoh config file path | `None` |
-| `priority` | Int | Message priority (-100 to 100) | `0` |
+| `priority` | Int | Message priority (1-7, lower=higher priority) | `5` |
 | `congestion-control` | String | `"block"` or `"drop"` | `"block"` |
 | `reliability` | String | `"reliable"` or `"best-effort"` | `"best-effort"` |
 
@@ -292,12 +292,12 @@ let config = match config_file {
 
 ### Simplified Architecture
 
-The plugin uses a **simplified synchronous model**:
+The plugin uses a **simplified synchronous model** for sink and source elements:
 
-- **No Background Threads**: All operations use Zenoh's synchronous API
-- **No Async Runtime**: Removed Tokio dependency for simplicity
-- **Blocking Operations**: Use `.wait()` for synchronous operation
-- **GStreamer Threading**: Relies on GStreamer's thread management
+- **ZenohSink/ZenohSrc**: No background threads, all operations use Zenoh's synchronous API with `.wait()`
+- **ZenohDemux**: Uses a dedicated receiver thread for Zenoh subscription processing
+- **No Async Runtime**: No Tokio dependency, uses blocking operations
+- **GStreamer Threading**: Relies on GStreamer's thread management for pipeline execution
 
 ### Thread Safety Guarantees
 
@@ -455,23 +455,21 @@ gst-launch-1.0 videotestsrc ! \
 
 ### Optimization Strategies
 
-1. **Zero-Copy**: Minimize buffer copying where possible
-2. **Efficient Serialization**: Direct byte transmission
-3. **Resource Pooling**: Future enhancement for buffer management
-4. **Network Efficiency**: Leverage Zenoh's optimized transport
+1. **Zero-Copy**: Uses `Cow::Borrowed` to avoid buffer copying when compression is disabled
+2. **Efficient Serialization**: Direct byte transmission with optional compression
+3. **Optional Compression**: Zstandard, LZ4, or Gzip compression to reduce bandwidth
+4. **Network Efficiency**: Leverages Zenoh's optimized transport
+5. **Buffer Metadata**: PTS, DTS, duration, and flags preserved for proper A/V sync
 
 ### Current Limitations
 
-- **Buffer Copies**: Some copying unavoidable in current design
-- **Synchronous API**: May limit throughput vs async operations
-- **No Compression**: Raw data transmission (can be added upstream)
+- **Buffer Copies**: Some copying unavoidable when compression is enabled
+- **Synchronous API**: May limit throughput vs async operations in high-frequency scenarios
 
 ### Future Optimizations
 
 - **Buffer Management**: Custom allocators and pooling
-- **Metadata Support**: Zenoh metadata for additional information
-- **Compression**: Integration with GStreamer compression elements
-- **Statistics**: Performance monitoring and reporting
+- **Session Sharing**: Allow multiple elements to share a single Zenoh session
 
 ## Testing Architecture
 

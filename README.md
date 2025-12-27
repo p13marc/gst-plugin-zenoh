@@ -26,7 +26,7 @@ Together, these elements enable distributed media applications, edge computing s
 
 ### Performance Optimization
 - **Express Mode**: Ultra-low latency mode that bypasses internal queues
-- **Session Sharing**: Efficient resource usage through shared Zenoh sessions
+- **Efficient Sessions**: Low-overhead Zenoh session management per element
 - **Batch Rendering**: Efficient buffer list processing for high-throughput scenarios
 - **Responsive State Changes**: Sub-second response to pipeline state changes with proper unlock/flush support
 - **Zero-Copy Data Paths**: Minimal overhead with Cow-based buffer handling when compression is disabled
@@ -509,7 +509,7 @@ zenohsink key-expr=compressed/video compression=gzip compression-level=6
 |----------|------|---------|-------------|
 | `key-expr` | String | *required* | Zenoh key expression for subscription (supports wildcards: `*`, `**`) |
 | `config` | String | `null` | Path to Zenoh configuration file |
-|| `priority` | Integer | `5` | Subscriber priority (1-7). Lower values = higher priority. 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background |
+| `priority` | Integer | `5` | Subscriber priority (1-7). Lower values = higher priority. 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background |
 | `congestion-control` | String | `"block"` | Informational only - actual behavior determined by publisher |
 | `reliability` | String | `"best-effort"` | Expected reliability mode - actual mode matches publisher |
 | `receive-timeout-ms` | Integer | `1000` | Timeout in milliseconds for receiving samples. Controls how long `create()` waits for data before checking for shutdown signals. |
@@ -646,20 +646,20 @@ cargo audit
 
 ### Session Management
 
-The plugin implements a flexible session architecture supporting both owned and shared Zenoh sessions:
+Each element manages its own Zenoh session, created during the `start()` transition and cleaned up automatically via Rust's `Drop` trait:
 
 ```rust
-// Architectural overview
-enum SessionWrapper {
-    Owned(zenoh::Session),    // Element manages its own session
-    Shared(Arc<zenoh::Session>), // Element shares session with others
+// State management pattern used by all elements
+enum State {
+    Stopped,
+    Started { session: zenoh::Session, publisher: zenoh::Publisher },
 }
 ```
 
-This design enables:
-- **Resource Efficiency**: Multiple elements can share a single network connection
-- **Scalability**: Reduced memory and network overhead for multi-element pipelines  
-- **Flexibility**: Mix of shared and dedicated sessions based on requirements
+This design provides:
+- **Simplicity**: Clear ownership and lifecycle management
+- **Isolation**: Each element operates independently
+- **Automatic Cleanup**: Resources released when element stops
 
 ### Thread Safety
 
@@ -684,7 +684,7 @@ Robust error handling throughout the plugin:
 2. **Install GStreamer development libraries** (see Quick Start)
 3. **Clone and build**:
    ```bash
-   git clone https://github.com/your-repo/gst-plugin-zenoh.git
+   git clone https://github.com/p13marc/gst-plugin-zenoh.git
    cd gst-plugin-zenoh
    cargo build
    ```
