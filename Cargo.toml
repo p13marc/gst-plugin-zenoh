@@ -19,13 +19,12 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-zenoh = { version = "1", features = ["unstable"] }
-zenoh-config = "1"
+zenoh = { version = "1.0", features = ["unstable"] }
+zenoh-config = "1.0"
 thiserror = "2.0.4"
 gst = { package = "gstreamer", version = "0.24.2" }
 gst-base = { package = "gstreamer-base", version = "0.24.2" }
 futures = "0.3.30"
-anyhow = "1"
 urlencoding = "2.1"
 
 # Optional compression dependencies
