@@ -501,6 +501,14 @@ impl ZenohDemux {
                             // Add pad to element
                             element.add_pad(&pad).unwrap();
 
+                            // Send stream-start event (required before any data)
+                            let stream_id = format!("zenohdemux/{}/{}", pad_name, sample_key_expr);
+                            pad.push_event(gst::event::StreamStart::new(&stream_id));
+
+                            // Send segment event (required before any data)
+                            let segment = gst::FormattedSegment::<gst::ClockTime>::new();
+                            pad.push_event(gst::event::Segment::new(&segment));
+
                             // Update statistics
                             stats.lock().unwrap().pads_created += 1;
 
