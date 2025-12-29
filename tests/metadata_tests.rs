@@ -13,7 +13,10 @@ use serial_test::serial;
 use zenoh::Wait;
 
 mod common;
-use common::{init, unique_key_expr};
+#[path = "common/key_expr.rs"]
+mod key_expr;
+use common::init;
+use key_expr::unique_key_expr;
 
 /// Helper to stop a pipeline with timeout (zenohsrc can block during state change)
 fn stop_pipeline_with_timeout(pipeline: &gst::Pipeline, timeout: Duration) {

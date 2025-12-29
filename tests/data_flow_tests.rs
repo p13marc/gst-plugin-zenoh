@@ -13,7 +13,13 @@ use serial_test::serial;
 use zenoh::Wait;
 
 mod common;
-use common::{generate_test_pattern, init, unique_key_expr, verify_test_pattern};
+#[path = "common/key_expr.rs"]
+mod key_expr;
+#[path = "common/patterns.rs"]
+mod patterns;
+use common::init;
+use key_expr::unique_key_expr;
+use patterns::{generate_test_pattern, verify_test_pattern};
 
 /// Helper to stop a pipeline with timeout (zenohsrc can block during state change)
 fn stop_pipeline_with_timeout(pipeline: &gst::Pipeline, timeout: Duration) {
