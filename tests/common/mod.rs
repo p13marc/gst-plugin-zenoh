@@ -2,9 +2,10 @@
 
 use std::sync::Once;
 
-pub mod helpers;
+mod helpers;
 
-pub use helpers::*;
+// Re-export only the helpers that are actually used by test files
+pub use helpers::{generate_test_pattern, unique_key_expr, verify_test_pattern};
 
 static INIT: Once = Once::new();
 

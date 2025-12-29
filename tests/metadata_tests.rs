@@ -39,7 +39,6 @@ struct CapturedMeta {
     duration: Option<gst::ClockTime>,
     offset: u64,
     offset_end: u64,
-    size: usize,
 }
 
 /// Test that PTS (Presentation Timestamp) is preserved through transmission.
@@ -87,7 +86,7 @@ fn test_pts_preservation() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                size: buffer.size(),
+                
             });
         }
         gst::PadProbeReturn::Remove
@@ -202,7 +201,7 @@ fn test_dts_preservation() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                size: buffer.size(),
+                
             });
         }
         gst::PadProbeReturn::Remove
@@ -317,7 +316,7 @@ fn test_duration_preservation() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                size: buffer.size(),
+                
             });
         }
         gst::PadProbeReturn::Remove
@@ -431,7 +430,7 @@ fn test_full_metadata_preservation() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                size: buffer.size(),
+                
             });
         }
         gst::PadProbeReturn::Remove
@@ -552,7 +551,7 @@ fn test_metadata_disabled_receiver() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                size: buffer.size(),
+                
             });
         }
         gst::PadProbeReturn::Remove

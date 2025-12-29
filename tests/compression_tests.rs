@@ -3,21 +3,21 @@
 //! These tests verify that data compressed by zenohsink is correctly
 //! decompressed by zenohsrc when compression features are enabled.
 
+#![cfg(any(
+    feature = "compression-zstd",
+    feature = "compression-lz4",
+    feature = "compression-gzip"
+))]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use gst::prelude::*;
+use gstzenoh::compression::CompressionType;
 use serial_test::serial;
 use zenoh::Wait;
-
-#[cfg(any(
-    feature = "compression-zstd",
-    feature = "compression-lz4",
-    feature = "compression-gzip"
-))]
-use gstzenoh::compression::CompressionType;
 
 mod common;
 use common::{init, unique_key_expr};
@@ -62,11 +62,6 @@ fn verify_test_data(data: &[u8], expected_size: usize) -> bool {
 }
 
 /// Test helper: send and receive data through zenoh with compression
-#[cfg(any(
-    feature = "compression-zstd",
-    feature = "compression-lz4",
-    feature = "compression-gzip"
-))]
 fn compression_roundtrip_test(compression: CompressionType, level: i32, data_size: usize) {
     init();
 
@@ -114,7 +109,9 @@ fn compression_roundtrip_test(compression: CompressionType, level: i32, data_siz
     // Create sender pipeline with compression
     let send_pipeline = gst::Pipeline::new();
 
-    let appsrc = gst_app::AppSrc::builder().format(gst::Format::Bytes).build();
+    let appsrc = gst_app::AppSrc::builder()
+        .format(gst::Format::Bytes)
+        .build();
 
     let zenohsink = gstzenoh::ZenohSink::builder(&key_expr)
         .session(zenoh_session.clone())
@@ -185,11 +182,6 @@ fn compression_roundtrip_test(compression: CompressionType, level: i32, data_siz
 }
 
 /// Test no compression (baseline)
-#[cfg(any(
-    feature = "compression-zstd",
-    feature = "compression-lz4",
-    feature = "compression-gzip"
-))]
 #[test]
 #[serial]
 fn test_no_compression_roundtrip() {

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use gst::prelude::*;
 use serial_test::serial;
-use zenoh::Wait;
 
 mod common;
 use common::{init, unique_key_expr};
