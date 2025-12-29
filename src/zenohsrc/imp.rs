@@ -511,7 +511,7 @@ impl BaseSrcImpl for ZenohSrc {
             // Priority 2: Session group property (gst-launch compatible)
             gst::debug!(CAT, "Using session group '{}'", group);
             let session = crate::session::get_or_create_session(group, config_file.as_deref())
-                .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+                .map_err(|e| ZenohError::Init(e).to_error_message())?;
             SessionWrapper::Shared(session)
         } else {
             // Priority 3: Create a new owned session
@@ -520,13 +520,13 @@ impl BaseSrcImpl for ZenohSrc {
                 Some(path) if !path.is_empty() => {
                     gst::debug!(CAT, "Loading Zenoh config from {}", path);
                     zenoh::Config::from_file(&path)
-                        .map_err(|e| ZenohError::InitError(e).to_error_message())?
+                        .map_err(|e| ZenohError::Init(e).to_error_message())?
                 }
                 _ => zenoh::Config::default(),
             };
             let session = zenoh::open(config)
                 .wait()
-                .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+                .map_err(|e| ZenohError::Init(e).to_error_message())?;
             SessionWrapper::Owned(session)
         };
 
@@ -551,7 +551,7 @@ impl BaseSrcImpl for ZenohSrc {
             .as_session()
             .declare_subscriber(key_expr)
             .wait()
-            .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+            .map_err(|e| ZenohError::Init(e).to_error_message())?;
 
         // Reacquire state lock to complete transition
         let mut state = self.state.lock().unwrap();

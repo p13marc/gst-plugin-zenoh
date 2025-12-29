@@ -722,7 +722,7 @@ impl BaseSinkImpl for ZenohSink {
             // Priority 2: Session group property (gst-launch compatible)
             gst::debug!(CAT, "Using session group '{}'", group);
             let session = crate::session::get_or_create_session(group, config_file.as_deref())
-                .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+                .map_err(|e| ZenohError::Init(e).to_error_message())?;
             SessionWrapper::Shared(session)
         } else {
             // Priority 3: Create a new owned session
@@ -731,13 +731,13 @@ impl BaseSinkImpl for ZenohSink {
                 Some(path) if !path.is_empty() => {
                     gst::debug!(CAT, "Loading Zenoh config from {}", path);
                     zenoh::Config::from_file(&path)
-                        .map_err(|e| ZenohError::InitError(e).to_error_message())?
+                        .map_err(|e| ZenohError::Init(e).to_error_message())?
                 }
                 _ => zenoh::Config::default(),
             };
             let session = zenoh::open(config)
                 .wait()
-                .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+                .map_err(|e| ZenohError::Init(e).to_error_message())?;
             SessionWrapper::Owned(session)
         };
 
@@ -753,7 +753,7 @@ impl BaseSinkImpl for ZenohSink {
 
         // Use owned key_expr for static lifetime, with proper error handling
         let owned = OwnedKeyExpr::try_from(key_expr.clone()).map_err(|e| {
-            ZenohError::KeyExprError {
+            ZenohError::KeyExpr {
                 key_expr: key_expr.clone(),
                 reason: e.to_string(),
             }
@@ -810,7 +810,7 @@ impl BaseSinkImpl for ZenohSink {
         }
 
         let publisher = publisher_builder.wait().map_err(|e| {
-            ZenohError::PublishError {
+            ZenohError::Publish {
                 key_expr: key_expr.clone(),
                 source: e,
             }
@@ -1139,7 +1139,7 @@ impl BaseSinkImpl for ZenohSink {
 
                 // Check if this is a network-related error before consuming e
                 let error_msg = format!("{}", e);
-                let err = ZenohError::PublishError {
+                let err = ZenohError::Publish {
                     key_expr,
                     source: e,
                 };
@@ -1266,7 +1266,7 @@ impl BaseSinkImpl for ZenohSink {
                     // Get key expression for error reporting
                     let key_expr = self.settings.lock().unwrap().key_expr.clone();
                     let error_msg = format!("{}", e);
-                    let err = ZenohError::PublishError {
+                    let err = ZenohError::Publish {
                         key_expr,
                         source: e,
                     };

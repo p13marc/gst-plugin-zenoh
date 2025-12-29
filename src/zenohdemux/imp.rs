@@ -355,7 +355,7 @@ impl ZenohDemux {
             // Use session group (gst-launch compatible)
             gst::debug!(CAT, imp = self, "Using session group '{}'", group);
             crate::session::get_or_create_session(group, config_file.as_deref())
-                .map_err(|e| ZenohError::InitError(e).to_error_message())?
+                .map_err(|e| ZenohError::Init(e).to_error_message())?
         } else {
             // Create a new session
             gst::debug!(CAT, imp = self, "Creating new Zenoh session");
@@ -363,13 +363,13 @@ impl ZenohDemux {
                 Some(path) if !path.is_empty() => {
                     gst::debug!(CAT, imp = self, "Loading Zenoh config from {}", path);
                     zenoh::Config::from_file(&path)
-                        .map_err(|e| ZenohError::InitError(e).to_error_message())?
+                        .map_err(|e| ZenohError::Init(e).to_error_message())?
                 }
                 _ => zenoh::Config::default(),
             };
             zenoh::open(config)
                 .wait()
-                .map_err(|e| ZenohError::InitError(e).to_error_message())?
+                .map_err(|e| ZenohError::Init(e).to_error_message())?
         };
 
         gst::debug!(
@@ -383,13 +383,13 @@ impl ZenohDemux {
         let subscriber_for_thread = session
             .declare_subscriber(&key_expr)
             .wait()
-            .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+            .map_err(|e| ZenohError::Init(e).to_error_message())?;
 
         // Create another subscriber to keep in state (for potential future use)
         let subscriber_for_state = session
             .declare_subscriber(&key_expr)
             .wait()
-            .map_err(|e| ZenohError::InitError(e).to_error_message())?;
+            .map_err(|e| ZenohError::Init(e).to_error_message())?;
 
         let stopping = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(Statistics::default()));

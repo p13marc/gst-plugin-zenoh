@@ -7,15 +7,15 @@ use thiserror::Error;
 pub enum ZenohError {
     /// Error initializing Zenoh session
     #[error("Failed to initialize Zenoh session: {0}")]
-    InitError(#[source] zenoh::Error),
+    Init(#[source] zenoh::Error),
 
     /// Error with key expression
     #[error("Invalid key expression '{key_expr}': {reason}")]
-    KeyExprError { key_expr: String, reason: String },
+    KeyExpr { key_expr: String, reason: String },
 
     /// Error publishing data
     #[error("Failed to publish to '{key_expr}': {source}")]
-    PublishError {
+    Publish {
         key_expr: String,
         #[source]
         source: zenoh::Error,
@@ -31,7 +31,7 @@ pub trait ErrorHandling {
 impl ErrorHandling for ZenohError {
     fn to_error_message(&self) -> gst::ErrorMessage {
         match self {
-            ZenohError::InitError(err) => {
+            ZenohError::Init(err) => {
                 gst::error_msg!(
                     gst::ResourceError::OpenRead,
                     [
@@ -40,7 +40,7 @@ impl ErrorHandling for ZenohError {
                     ]
                 )
             }
-            ZenohError::KeyExprError { key_expr, reason } => {
+            ZenohError::KeyExpr { key_expr, reason } => {
                 gst::error_msg!(
                     gst::ResourceError::Settings,
                     [
@@ -50,7 +50,7 @@ impl ErrorHandling for ZenohError {
                     ]
                 )
             }
-            ZenohError::PublishError { key_expr, source } => {
+            ZenohError::Publish { key_expr, source } => {
                 gst::error_msg!(
                     gst::ResourceError::Write,
                     [
@@ -73,9 +73,9 @@ pub trait FlowErrorHandling {
 impl FlowErrorHandling for ZenohError {
     fn to_flow_error(&self) -> gst::FlowError {
         match self {
-            ZenohError::InitError(_) => gst::FlowError::NotNegotiated,
-            ZenohError::KeyExprError { .. } => gst::FlowError::NotNegotiated,
-            ZenohError::PublishError { .. } => gst::FlowError::Error,
+            ZenohError::Init(_) => gst::FlowError::NotNegotiated,
+            ZenohError::KeyExpr { .. } => gst::FlowError::NotNegotiated,
+            ZenohError::Publish { .. } => gst::FlowError::Error,
         }
     }
 }
