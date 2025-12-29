@@ -149,13 +149,26 @@ let sink2 = ZenohSink::builder("demo/audio")
 Tests use `serial_test` for isolation since GStreamer plugin registration is global:
 
 ```bash
-cargo test                              # All tests (101 tests)
+cargo test                              # All tests (~120 tests)
 cargo test --test plugin_tests          # Element creation, properties
 cargo test --test integration_tests     # Pipeline integration
 cargo test --test uri_handler_tests     # URI parsing, buffer metadata properties
 cargo test --test statistics_tests      # Stats properties
 cargo test --test zenohdemux_tests      # Demux element tests
+cargo test --test data_flow_tests       # End-to-end data transmission
+cargo test --test metadata_tests        # Buffer metadata preservation (PTS, DTS, duration)
+cargo test --test compression_tests     # Compression round-trip (requires compression feature)
+cargo test --test demux_flow_tests      # Demux pad creation and data routing
 ```
+
+### Test Architecture Note
+
+**Important:** `gst_check::Harness` cannot be used with zenoh elements because:
+- `Harness::new()` calls `gst_harness_play()` which expects `GST_STATE_CHANGE_SUCCESS`
+- Zenoh elements return `GST_STATE_CHANGE_ASYNC` (network connection required)
+- This causes assertion failures in the GStreamer test harness
+
+Instead, tests use manual pipeline construction with pad probes or direct Zenoh session sharing for data verification. See `TESTING_PLAN.md` for the comprehensive test strategy.
 
 ## Common Development Tasks
 
