@@ -2,6 +2,10 @@
 
 use std::sync::Once;
 
+pub mod helpers;
+
+pub use helpers::*;
+
 static INIT: Once = Once::new();
 
 /// Initialize GStreamer and register the plugin for tests.

@@ -852,6 +852,7 @@ dependencies = [
  "futures",
  "gst-plugin-version-helper",
  "gstreamer",
+ "gstreamer-app",
  "gstreamer-base",
  "gstreamer-check",
  "lz4",
@@ -886,6 +887,34 @@ dependencies = [
  "pin-project-lite",
  "smallvec",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "gstreamer-app"
+version = "0.24.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "895753fb0f976693f321e6b9d68f746ef9095f1a5b8277c11d85d807a949fbfc"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "glib",
+ "gstreamer",
+ "gstreamer-app-sys",
+ "gstreamer-base",
+ "libc",
+]
+
+[[package]]
+name = "gstreamer-app-sys"
+version = "0.24.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7719cee28afda1a48ab1ee93769628bd0653d3c5be1923bce9a8a4550fcc980"
+dependencies = [
+ "glib-sys",
+ "gstreamer-base-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps",
 ]
 
 [[package]]
