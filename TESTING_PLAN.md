@@ -1,5 +1,64 @@
 # Testing Plan for gst-plugin-zenoh
 
+## Research: GStreamer Testing Best Practices
+
+Based on research of official GStreamer documentation and gst-plugins-rs:
+
+### Recommended Tools
+
+1. **[GstHarness](https://gstreamer.freedesktop.org/documentation/check/gstharness.html)** - Primary testing framework
+   - Treats element as "black box"
+   - Two floating pads connect to element's src/sink
+   - Deterministic data injection and output inspection
+   - Already available via `gst-check` crate in our dependencies
+
+2. **[TestClock](https://docs.rs/gstreamer-check)** - For time-sensitive testing
+   - Control time progression deterministically
+   - Useful for testing timing-related behavior
+
+3. **AppSrc/AppSink** - For data flow testing
+   - `appsrc`: Inject known data into pipeline
+   - `appsink`: Capture and verify output data
+   - Best for end-to-end integration tests
+
+### Key GstHarness Methods
+
+| Method | Purpose |
+|--------|---------|
+| `Harness::new(element_name)` | Create harness for element |
+| `set_src_caps_str()` | Set input capabilities |
+| `push()` | Send buffer to element |
+| `pull()` | Get buffer from element (60s timeout) |
+| `try_pull()` | Non-blocking buffer retrieval |
+| `push_and_pull()` | Combined push/pull |
+| `use_testclock()` | Install deterministic clock |
+
+### Testing Patterns from gst-plugins-rs
+
+```rust
+// Pattern 1: Simple element test with Harness
+let h = gst_check::Harness::new("element_name");
+h.set_src_caps_str("video/x-raw,format=RGB");
+let buf = h.create_buffer(1024);
+h.push(buf);
+let out = h.pull().unwrap();
+
+// Pattern 2: AppSrc/AppSink for integration
+let appsrc = gst_app::AppSrc::builder()
+    .caps(&caps)
+    .format(gst::Format::Time)
+    .build();
+appsrc.push_buffer(buffer);
+```
+
+### Sources
+- [GstHarness Documentation](https://gstreamer.freedesktop.org/documentation/check/gstharness.html)
+- [gstreamer-check crate](https://lib.rs/crates/gstreamer-check)
+- [gst-plugins-rs repository](https://github.com/GStreamer/gst-plugins-rs)
+- [gstreamer-rs examples](https://github.com/sdroege/gstreamer-rs/blob/main/examples/src/bin/appsrc.rs)
+
+---
+
 ## Current State
 
 - **Total tests**: 154 (21 unit tests + 133 integration tests)

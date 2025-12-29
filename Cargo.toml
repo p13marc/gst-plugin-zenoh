@@ -37,6 +37,7 @@ flate2 = { version = "1.0", optional = true }
 anyhow = "1"
 futures = "0.3"
 gst = { package = "gstreamer", version = "0.24.2" }
+gst-app = { package = "gstreamer-app", version = "0.24.2" }
 gst-check = { package = "gstreamer-check", version = "0.24.2" }
 serial_test = "3.0"
 
