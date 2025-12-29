@@ -193,4 +193,3 @@ fn test_element_state_changes() {
     let null_result = sink.set_state(gst::State::Null);
     assert!(null_result.is_ok());
 }
-

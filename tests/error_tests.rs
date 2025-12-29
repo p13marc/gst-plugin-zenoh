@@ -142,7 +142,7 @@ fn test_priority_bounds() {
     assert!(
         result.is_err(),
         "Setting priority outside bounds should panic"
-);
+    );
 
     let result = std::panic::catch_unwind(|| {
         sink.set_property("priority", 8u32);

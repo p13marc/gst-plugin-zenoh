@@ -126,8 +126,8 @@ pub fn compress(
 
         #[cfg(feature = "compression-gzip")]
         CompressionType::Gzip => {
-            use flate2::write::GzEncoder;
             use flate2::Compression;
+            use flate2::write::GzEncoder;
             use std::io::Write;
 
             let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level as u32));

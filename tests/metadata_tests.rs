@@ -86,7 +86,6 @@ fn test_pts_preservation() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                
             });
         }
         gst::PadProbeReturn::Remove
@@ -201,7 +200,6 @@ fn test_dts_preservation() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                
             });
         }
         gst::PadProbeReturn::Remove
@@ -316,7 +314,6 @@ fn test_duration_preservation() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                
             });
         }
         gst::PadProbeReturn::Remove
@@ -430,7 +427,6 @@ fn test_full_metadata_preservation() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                
             });
         }
         gst::PadProbeReturn::Remove
@@ -551,7 +547,6 @@ fn test_metadata_disabled_receiver() {
                 duration: buffer.duration(),
                 offset: buffer.offset(),
                 offset_end: buffer.offset_end(),
-                
             });
         }
         gst::PadProbeReturn::Remove

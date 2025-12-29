@@ -15,35 +15,35 @@ fn main() -> Result<(), Error> {
 
     src_pipeline.set_state(gst::State::Playing)?;
     sink_pipeline.set_state(gst::State::Playing)?;
-    
+
     // Create a new main loop
     let main_loop = gst::glib::MainLoop::new(None, false);
-    
+
     // Add watches for both bus messages
     let main_loop_clone = main_loop.clone();
     let _src_watch = src_pipeline.bus().unwrap().add_watch(move |_, msg| {
         handle_message(&main_loop_clone, msg);
         gst::glib::ControlFlow::Continue
     })?;
-    
+
     let main_loop_clone = main_loop.clone();
     let _sink_watch = sink_pipeline.bus().unwrap().add_watch(move |_, msg| {
         handle_message(&main_loop_clone, msg);
         gst::glib::ControlFlow::Continue
     })?;
-    
+
     // Start the main loop
     main_loop.run();
-    
+
     src_pipeline.set_state(gst::State::Null)?;
     sink_pipeline.set_state(gst::State::Null)?;
-    
+
     Ok(())
 }
 
 fn handle_message(main_loop: &gst::glib::MainLoop, msg: &gst::Message) {
     use gst::MessageView;
-    
+
     match msg.view() {
         MessageView::Eos(..) => {
             eprintln!("Unexpected EOS");
