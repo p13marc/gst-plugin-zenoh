@@ -14,7 +14,6 @@ use crate::error::{ErrorHandling, ZenohError};
 use crate::metadata::MetadataParser;
 
 // Define debug category for logging
-#[allow(dead_code)]
 static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new("zenohsrc", gst::DebugColorFlags::empty(), Some("Zenoh Src"))
 });
@@ -25,15 +24,12 @@ struct Statistics {
     bytes_received: u64,
     messages_received: u64,
     errors: u64,
-    #[allow(dead_code)]
-    start_time: Option<gst::ClockTime>,
 }
 
 struct Started {
     // Keeping session field to maintain ownership and prevent session from being dropped
     // while subscriber is still in use. This can be either owned or shared.
-    #[allow(dead_code)]
-    session: SessionWrapper,
+    _session: SessionWrapper,
     subscriber:
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
     /// Flag to signal that the element is flushing and should cancel blocking operations
@@ -573,18 +569,10 @@ impl BaseSrcImpl for ZenohSrc {
         }
 
         *state = State::Started(Started {
-            session: session_wrapper,
+            _session: session_wrapper,
             subscriber,
             flushing: Arc::new(AtomicBool::new(false)),
-            stats: Arc::new(Mutex::new(Statistics {
-                start_time: Some(gst::ClockTime::from_nseconds(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() as u64,
-                )),
-                ..Default::default()
-            })),
+            stats: Arc::new(Mutex::new(Statistics::default())),
         });
 
         gst::debug!(CAT, "ZenohSrc successfully transitioned to Started state");

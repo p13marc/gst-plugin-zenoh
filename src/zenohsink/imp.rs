@@ -27,8 +27,6 @@ struct Statistics {
     messages_sent: u64,
     errors: u64,
     dropped: u64, // For congestion-control=drop mode
-    #[allow(dead_code)]
-    start_time: Option<gst::ClockTime>,
     #[cfg(any(
         feature = "compression-zstd",
         feature = "compression-lz4",
@@ -46,8 +44,7 @@ struct Statistics {
 struct Started {
     // Keeping session field to maintain ownership and prevent session from being dropped
     // while publisher is still in use. This can be either owned or shared.
-    #[allow(dead_code)]
-    session: SessionWrapper,
+    _session: SessionWrapper,
     publisher: zenoh::pubsub::Publisher<'static>,
     /// Statistics tracking (shared for thread-safe updates)
     stats: Arc<Mutex<Statistics>>,
@@ -846,17 +843,9 @@ impl BaseSinkImpl for ZenohSink {
         }
 
         *state = State::Started(Started {
-            session: session_wrapper,
+            _session: session_wrapper,
             publisher,
-            stats: Arc::new(Mutex::new(Statistics {
-                start_time: Some(gst::ClockTime::from_nseconds(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() as u64,
-                )),
-                ..Default::default()
-            })),
+            stats: Arc::new(Mutex::new(Statistics::default())),
             caps_sent: Arc::new(AtomicBool::new(false)),
             last_caps_time: Arc::new(Mutex::new(None)),
             last_caps: Arc::new(Mutex::new(None)),

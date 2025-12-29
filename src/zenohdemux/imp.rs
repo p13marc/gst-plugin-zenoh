@@ -46,11 +46,9 @@ struct Statistics {
 
 struct Started {
     // Keep session alive for the duration of the element
-    #[allow(dead_code)]
-    session: zenoh::Session,
+    _session: zenoh::Session,
     // Keep subscriber alive (actual receiving is done in thread with its own subscriber)
-    #[allow(dead_code)]
-    subscriber:
+    _subscriber:
         zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
     /// Flag to signal that the element is stopping
     stopping: Arc<AtomicBool>,
@@ -417,8 +415,8 @@ impl ZenohDemux {
         });
 
         *state = State::Started(Started {
-            session,
-            subscriber: subscriber_for_state,
+            _session: session,
+            _subscriber: subscriber_for_state,
             stopping,
             stats,
             pads,

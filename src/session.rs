@@ -92,17 +92,6 @@ pub(crate) fn get_or_create_session(
     Ok(session)
 }
 
-/// Remove a session group from the registry.
-///
-/// This should be called when all elements using a session group have stopped.
-/// However, since Session is Arc-based, the actual session won't be closed
-/// until all clones are dropped.
-#[allow(dead_code)]
-pub(crate) fn remove_session_group(group: &str) {
-    let mut registry = SESSION_REGISTRY.lock().unwrap();
-    registry.remove(group);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
