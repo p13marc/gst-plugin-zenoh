@@ -5,6 +5,17 @@ All notable changes to gst-plugin-zenoh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2025-12-29
+
+### Fixed
+
+- **zenohdemux**: Send required `stream-start` and `segment` events before pushing data buffers, fixing GStreamer warning "Got data flow before stream-start event"
+
+### Changed
+
+- **Code cleanup**: Removed all `#[allow(dead_code)]` attributes, simplified `ZenohError` enum variants (renamed `InitError` → `Init`, `KeyExprError` → `KeyExpr`, `PublishError` → `Publish`)
+- **Test organization**: Split test helpers into separate modules (`key_expr.rs`, `patterns.rs`) to eliminate unused code warnings
+
 ## [0.3.1] - 2025-12-27
 
 ### Added
