@@ -49,6 +49,8 @@ gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 
 - **QoS Control**: Reliability modes, congestion control, priority levels (1-7)
 - **Low Latency**: Express mode, zero-copy paths, efficient session management
+- **Subscriber Matching**: Detect subscriber presence via `has-subscribers` property, `matching-changed` signal, and bus messages
+- **On-Demand Pipelines**: Start/stop pipelines based on subscriber presence — conserve resources when no one is listening
 - **Session Sharing**: Share Zenoh sessions across elements to reduce overhead
 - **Compression**: Optional Zstandard, LZ4, or Gzip (compile-time features)
 - **Buffer Metadata**: PTS, DTS, duration, flags preserved for A/V sync
@@ -76,6 +78,38 @@ println!("Sent: {} bytes", sink.bytes_sent());
 ```
 
 See [docs.rs](https://docs.rs/gst-plugin-zenoh) for full API documentation.
+
+## On-Demand Pipelines
+
+Detect subscriber presence and start/stop pipelines automatically. The pipeline stays in READY (Zenoh resources active, no data flowing) until a subscriber connects:
+
+```bash
+# gst-launch: watch for matching changes via bus messages
+gst-launch-1.0 videotestsrc is-live=true ! zenohsink key-expr=demo/video
+# Bus posts "zenoh-matching-changed" messages with has-subscribers field
+```
+
+```rust
+use gstzenoh::ZenohSink;
+
+let sink = ZenohSink::builder("demo/video").build();
+
+// React to subscriber presence changes
+let pipeline_weak = pipeline.downgrade();
+sink.connect_matching_changed(move |_sink, has_subscribers| {
+    let Some(pipeline) = pipeline_weak.upgrade() else { return };
+    if has_subscribers {
+        let _ = pipeline.set_state(gst::State::Playing);
+    } else {
+        let _ = pipeline.set_state(gst::State::Ready);
+    }
+});
+
+// Start in READY — matching detection works, no data flows
+pipeline.set_state(gst::State::Ready)?;
+```
+
+See `examples/on_demand.rs` for a complete example.
 
 ## Compression
 

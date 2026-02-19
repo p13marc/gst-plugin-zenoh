@@ -31,6 +31,7 @@ cargo test --test integration_tests
 # Run examples (must set plugin path)
 GST_PLUGIN_PATH=target/debug cargo run --example basic
 GST_PLUGIN_PATH=target/debug cargo run --example configuration
+GST_PLUGIN_PATH=target/debug cargo run --example on_demand
 
 # Code quality
 cargo fmt --check
@@ -59,7 +60,12 @@ src/
 
 ### Key Implementation Details
 
-- **ZenohSink** (`zenohsink/imp.rs`): Extends `gst_base::BaseSink`. On `start()`, creates a Zenoh session and publisher. The `render()` method maps GStreamer buffers and publishes via `publisher.put().wait()`.
+- **ZenohSink** (`zenohsink/imp.rs`): Extends `gst_base::BaseSink`. Uses two-phase state management:
+  - `change_state(NullToReady)`: Creates Zenoh session, publisher, and matching listener (`ReadyState`)
+  - `start()` (READY→PAUSED): Promotes `ReadyState` to `Started` with render-time resources (stats, caps tracking)
+  - `stop()` (PAUSED→READY): Demotes back to `ReadyState`, keeping Zenoh resources alive
+  - `change_state(ReadyToNull)`: Tears down all Zenoh resources
+  - The `render()` method maps GStreamer buffers and publishes via `publisher.put().wait()`
 
 - **ZenohSrc** (`zenohsrc/imp.rs`): Extends `gst_base::PushSrc`. On `start()`, creates a Zenoh session and subscriber with FIFO handler. The `create()` method uses `subscriber.recv_timeout()` (configurable via `receive-timeout-ms`) to get samples. Supports buffer metadata restoration via `apply-buffer-meta` property.
 
@@ -67,7 +73,11 @@ src/
 
 - **Synchronous API**: Uses Zenoh's `.wait()` for synchronous operations. No Tokio runtime.
 
-- **State Management**: Simple `Stopped`/`Started(resources)` enum. Resources cleaned up via `Drop`.
+- **State Management (zenohsink)**: Two-phase `Stopped`/`Ready(ReadyState)`/`Started(Started)` enum. `ReadyState` holds lightweight Zenoh resources (session, publisher, matching listener). `Started` wraps `ReadyState` and adds render-time resources (stats, caps). This enables subscriber matching detection from READY state without consuming pipeline resources.
+
+- **State Management (zenohsrc, zenohdemux)**: Simple `Stopped`/`Started(resources)` enum. Resources cleaned up via `Drop`.
+
+- **Subscriber Matching** (`zenohsink`): Uses Zenoh's background matching listener to detect subscriber presence. Exposes `has-subscribers` read-only property, `matching-changed` GLib signal, and `zenoh-matching-changed` bus message. Works from READY state.
 
 - **Caps Transmission**: First buffer sends GStreamer caps as Zenoh attachment metadata (controlled by `send-caps` property).
 
@@ -149,7 +159,7 @@ let sink2 = ZenohSink::builder("demo/audio")
 Tests use `serial_test` for isolation since GStreamer plugin registration is global:
 
 ```bash
-cargo test                              # All tests (~120 tests)
+cargo test                              # All tests (~148 tests)
 cargo test --test plugin_tests          # Element creation, properties
 cargo test --test integration_tests     # Pipeline integration
 cargo test --test uri_handler_tests     # URI parsing, buffer metadata properties
@@ -159,7 +169,8 @@ cargo test --test data_flow_tests       # End-to-end data transmission
 cargo test --test metadata_tests        # Buffer metadata preservation (PTS, DTS, duration)
 cargo test --test compression_tests     # Compression round-trip (requires compression feature)
 cargo test --test demux_flow_tests      # Demux pad creation and data routing
-cargo test --test matching_tests       # Subscriber matching status (has-subscribers, signal, bus message)
+cargo test --test matching_tests        # Subscriber matching status (has-subscribers, signal, bus message)
+cargo test --test on_demand_tests      # On-demand pipeline lifecycle (READY→PLAYING→READY)
 ```
 
 ### Test Architecture Note

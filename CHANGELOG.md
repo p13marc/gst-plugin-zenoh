@@ -5,6 +5,41 @@ All notable changes to gst-plugin-zenoh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-19
+
+### Added
+
+#### Subscriber Matching Detection
+- **`has-subscribers` property** (read-only, bool): Query whether matching Zenoh subscribers currently exist for the publisher's key expression
+- **`matching-changed` signal**: Emitted when subscriber presence changes — receives `true` when first subscriber connects, `false` when last subscriber leaves
+- **`zenoh-matching-changed` bus message**: Posted on the GStreamer bus with `has-subscribers` field, compatible with `gst-launch-1.0` pipelines
+- **`has_subscribers()` typed getter**: Rust API for querying subscriber status
+- **`connect_matching_changed()` typed helper**: Rust API for connecting to the signal with proper types
+- Uses Zenoh's background matching listener — zero thread overhead, automatic cleanup
+
+#### On-Demand Pipeline Support
+- Matching detection works from **READY state** — no need to consume pipeline resources (encoders, capture devices) just to detect subscribers
+- Enables the on-demand pattern: pipeline starts in READY, transitions to PLAYING when subscribers appear, returns to READY when they leave
+- **`examples/on_demand.rs`**: Complete example demonstrating READY→PLAYING→READY lifecycle
+
+### Changed
+
+#### Architecture: Two-Phase State Management
+- **Breaking internal change**: Zenoh resources (session, publisher, matching listener) are now created during `NULL→READY` instead of `READY→PAUSED`
+  - `change_state(NullToReady)`: Creates session, publisher, and matching listener (`ReadyState`)
+  - `start()` (READY→PAUSED): Promotes `ReadyState` to `Started` with render-time resources (stats, caps tracking)
+  - `stop()` (PAUSED→READY): Demotes back to `ReadyState`, keeping Zenoh resources alive
+  - `change_state(ReadyToNull)`: Tears down all Zenoh resources
+- Properties that depend on Zenoh publisher (`key-expr`, `config`, `priority`, `reliability`, `congestion-control`, `express`, `session-group`) are now locked in both Ready and Started states (previously only locked in Started)
+- **Test coverage**: Added 10 new tests (7 matching + 3 on-demand), 148 total
+
+### Notes
+
+This is a **minor version bump** (0.3.x → 0.4.0) because:
+- External property/signal API is purely additive (no breaking changes for users)
+- Internal state management was restructured (affects custom subclass implementations, if any)
+- The timing of when Zenoh resources are created changed (NULL→READY instead of READY→PAUSED)
+
 ## [0.3.2] - 2025-12-29
 
 ### Fixed
