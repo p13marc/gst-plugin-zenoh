@@ -41,11 +41,25 @@ struct Statistics {
     bytes_after_compression: u64,
 }
 
-struct Started {
+/// Zenoh resources created during NULL→READY transition.
+///
+/// These are lightweight network resources (session + publisher + matching listener)
+/// that allow detecting subscriber presence without consuming pipeline resources.
+/// No data flows until the pipeline reaches PLAYING state.
+struct ReadyState {
     // Keeping session field to maintain ownership and prevent session from being dropped
     // while publisher is still in use. This can be either owned or shared.
     _session: SessionWrapper,
     publisher: zenoh::pubsub::Publisher<'static>,
+    /// Whether there are currently matching Zenoh subscribers.
+    /// Updated via Zenoh's background matching listener callback.
+    has_subscribers: Arc<AtomicBool>,
+}
+
+/// Additional resources created during READY→PAUSED (start()) for data rendering.
+struct Started {
+    /// Zenoh resources (session, publisher, matching listener)
+    ready: ReadyState,
     /// Statistics tracking (shared for thread-safe updates)
     stats: Arc<Mutex<Statistics>>,
     /// Track if we've sent caps metadata yet (for first buffer)
@@ -86,6 +100,9 @@ impl SessionWrapper {
 enum State {
     #[default]
     Stopped,
+    /// Zenoh session + publisher created, matching listener active.
+    /// No data flows — pipeline is in GStreamer READY state.
+    Ready(ReadyState),
     Starting, // Intermediate state during startup
     Started(Started),
     Stopping, // Intermediate state during shutdown
@@ -96,16 +113,29 @@ impl State {
         matches!(self, State::Started(_))
     }
 
+    fn is_ready_or_started(&self) -> bool {
+        matches!(self, State::Ready(_) | State::Started(_))
+    }
+
     fn is_stopped(&self) -> bool {
         matches!(self, State::Stopped)
     }
 
     fn can_start(&self) -> bool {
-        matches!(self, State::Stopped)
+        matches!(self, State::Ready(_))
     }
 
     fn can_stop(&self) -> bool {
         matches!(self, State::Started(_))
+    }
+
+    /// Returns the has_subscribers atomic, if available (Ready or Started).
+    fn has_subscribers(&self) -> Option<&Arc<AtomicBool>> {
+        match self {
+            State::Ready(ready) => Some(&ready.has_subscribers),
+            State::Started(started) => Some(&started.ready.has_subscribers),
+            _ => None,
+        }
     }
 }
 
@@ -223,6 +253,173 @@ impl ZenohSink {
         let mut settings = self.settings.lock().unwrap();
         settings.external_session = Some(session);
     }
+
+    /// Creates the Zenoh session, publisher, and matching listener.
+    ///
+    /// Called during NULL→READY to set up lightweight network resources
+    /// for subscriber matching detection. No data flows at this point.
+    fn create_zenoh_resources(&self) -> Result<ReadyState, gst::ErrorMessage> {
+        let settings = self.settings.lock().unwrap();
+        let key_expr = settings.key_expr.clone();
+        let config_file = settings.config_file.clone();
+        let priority = settings.priority;
+        let congestion_control = settings.congestion_control.clone();
+        let reliability = settings.reliability.clone();
+        let express = settings.express;
+        let external_session = settings.external_session.clone();
+        let session_group = settings.session_group.clone();
+        drop(settings);
+
+        // Validate the key expression
+        if key_expr.is_empty() {
+            return Err(gst::error_msg!(
+                gst::ResourceError::Settings,
+                ["Key expression is required"]
+            ));
+        }
+
+        // Determine session source: external (Rust API) > session-group (property) > new session
+        let session_wrapper = if let Some(shared_session) = external_session {
+            gst::debug!(CAT, "Using external shared session (Rust API)");
+            SessionWrapper::Shared(shared_session)
+        } else if let Some(ref group) = session_group {
+            gst::debug!(CAT, "Using session group '{}'", group);
+            let session = crate::session::get_or_create_session(group, config_file.as_deref())
+                .map_err(|e| ZenohError::Init(e).to_error_message())?;
+            SessionWrapper::Shared(session)
+        } else {
+            gst::debug!(CAT, "Creating new Zenoh session");
+            let config = match config_file {
+                Some(path) if !path.is_empty() => {
+                    gst::debug!(CAT, "Loading Zenoh config from {}", path);
+                    zenoh::Config::from_file(&path)
+                        .map_err(|e| ZenohError::Init(e).to_error_message())?
+                }
+                _ => zenoh::Config::default(),
+            };
+            let session = zenoh::open(config)
+                .wait()
+                .map_err(|e| ZenohError::Init(e).to_error_message())?;
+            SessionWrapper::Owned(session)
+        };
+
+        gst::debug!(
+            CAT,
+            "Creating publisher with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
+            key_expr,
+            priority,
+            congestion_control,
+            reliability,
+            express
+        );
+
+        let owned = OwnedKeyExpr::try_from(key_expr.clone()).map_err(|e| {
+            ZenohError::KeyExpr {
+                key_expr: key_expr.clone(),
+                reason: e.to_string(),
+            }
+            .to_error_message()
+        })?;
+
+        let zenoh_priority = Priority::try_from(priority).unwrap_or(Priority::default());
+
+        let zenoh_congestion_control = match congestion_control.as_str() {
+            "block" => CongestionControl::Block,
+            "drop" => CongestionControl::Drop,
+            _ => {
+                gst::warning!(
+                    CAT,
+                    "Unknown congestion control '{}', using default",
+                    congestion_control
+                );
+                CongestionControl::Block
+            }
+        };
+
+        let zenoh_reliability = match reliability.as_str() {
+            "reliable" => Reliability::Reliable,
+            "best-effort" => Reliability::BestEffort,
+            _ => {
+                gst::warning!(CAT, "Unknown reliability '{}', using default", reliability);
+                Reliability::BestEffort
+            }
+        };
+
+        let mut publisher_builder = session_wrapper
+            .as_session()
+            .declare_publisher(owned)
+            .priority(zenoh_priority)
+            .congestion_control(zenoh_congestion_control)
+            .reliability(zenoh_reliability);
+
+        if express {
+            publisher_builder = publisher_builder.express(true);
+        }
+
+        let publisher = publisher_builder.wait().map_err(|e| {
+            ZenohError::Publish {
+                key_expr: key_expr.clone(),
+                source: e,
+            }
+            .to_error_message()
+        })?;
+
+        gst::debug!(
+            CAT,
+            "Publisher created with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
+            key_expr,
+            priority,
+            congestion_control,
+            reliability,
+            express
+        );
+
+        // Set up matching status tracking via Zenoh's background callback.
+        let has_subscribers = Arc::new(AtomicBool::new(false));
+        {
+            let has_subscribers = has_subscribers.clone();
+            let element_weak = self.obj().downgrade();
+
+            publisher
+                .matching_listener()
+                .callback(move |status| {
+                    let matching = status.matching();
+                    has_subscribers.store(matching, Ordering::Relaxed);
+
+                    if let Some(element) = element_weak.upgrade() {
+                        element.emit_by_name::<()>("matching-changed", &[&matching]);
+
+                        let element_ref = element.upcast_ref::<gst::Element>();
+                        if let Some(bus) = element_ref.bus() {
+                            let s = gst::Structure::builder("zenoh-matching-changed")
+                                .field("has-subscribers", matching)
+                                .build();
+                            let _ = bus
+                                .post(gst::message::Element::builder(s).src(element_ref).build());
+                        }
+                    }
+                })
+                .background()
+                .wait()
+                .map_err(|e| ZenohError::Init(e).to_error_message())?;
+        }
+
+        // Check initial matching status (the callback only fires on *changes*)
+        if let Ok(initial_status) = publisher.matching_status().wait() {
+            has_subscribers.store(initial_status.matching(), Ordering::Relaxed);
+            gst::debug!(
+                CAT,
+                "Initial matching status: has_subscribers={}",
+                initial_status.matching()
+            );
+        }
+
+        Ok(ReadyState {
+            _session: session_wrapper,
+            publisher,
+            has_subscribers,
+        })
+    }
 }
 
 impl GstObjectImpl for ZenohSink {}
@@ -260,6 +457,27 @@ impl ElementImpl for ZenohSink {
         &self,
         transition: gst::StateChange,
     ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
+        match transition {
+            gst::StateChange::NullToReady => {
+                // Create Zenoh session, publisher, and matching listener.
+                // This is lightweight — no data flows, but subscriber
+                // matching detection is available from READY state.
+                let ready_state = self.create_zenoh_resources().map_err(|err| {
+                    gst::error!(CAT, "Failed to create Zenoh resources: {:?}", err);
+                    gst::StateChangeError
+                })?;
+                let mut state = self.state.lock().unwrap();
+                *state = State::Ready(ready_state);
+            }
+            gst::StateChange::ReadyToNull => {
+                // Clean up all Zenoh resources.
+                let mut state = self.state.lock().unwrap();
+                *state = State::Stopped;
+                gst::debug!(CAT, "Zenoh resources cleaned up (READY→NULL)");
+            }
+            _ => {}
+        }
+
         self.parent_change_state(transition)
     }
 }
@@ -267,6 +485,17 @@ impl ElementImpl for ZenohSink {
 impl ObjectImpl for ZenohSink {
     fn constructed(&self) {
         self.parent_constructed();
+    }
+
+    fn signals() -> &'static [glib::subclass::Signal] {
+        static SIGNALS: LazyLock<Vec<glib::subclass::Signal>> = LazyLock::new(|| {
+            vec![
+                glib::subclass::Signal::builder("matching-changed")
+                    .param_types([bool::static_type()])
+                    .build(),
+            ]
+        });
+        SIGNALS.as_ref()
     }
 
     fn properties() -> &'static [gst::glib::ParamSpec] {
@@ -355,6 +584,13 @@ impl ObjectImpl for ZenohSink {
                     .nick("Session Group")
                     .blurb("Name of the session group for sharing Zenoh sessions across elements. Elements with the same group name share a single session.")
                     .build(),
+                // Matching status property (read-only)
+                glib::ParamSpecBoolean::builder("has-subscribers")
+                    .nick("Has Subscribers")
+                    .blurb("Whether there are currently matching Zenoh subscribers for this publisher's key expression")
+                    .default_value(false)
+                    .read_only()
+                    .build(),
                 // Statistics properties (read-only)
                 glib::ParamSpecUInt64::builder("bytes-sent")
                     .nick("Bytes Sent")
@@ -404,9 +640,11 @@ impl ObjectImpl for ZenohSink {
     }
 
     fn set_property(&self, _id: usize, value: &gst::glib::Value, pspec: &gst::glib::ParamSpec) {
-        // Check if we're in a state where property changes are allowed
+        // Check if we're in a state where property changes are allowed.
+        // Zenoh resources (session, publisher) are created during NULL→READY,
+        // so these properties are locked once in Ready or Started state.
         let state = self.state.lock().unwrap();
-        if state.is_started()
+        if state.is_ready_or_started()
             && matches!(
                 pspec.name(),
                 "key-expr"
@@ -420,7 +658,7 @@ impl ObjectImpl for ZenohSink {
         {
             gst::warning!(
                 CAT,
-                "Cannot change property '{}' while element is started",
+                "Cannot change property '{}' while element is in Ready or Started state",
                 pspec.name()
             );
             return;
@@ -577,35 +815,27 @@ impl ObjectImpl for ZenohSink {
                 let settings = self.settings.lock().unwrap();
                 settings.compression_level.to_value()
             }
-            // Statistics properties - read from state
-            "bytes-sent" => {
+            // Matching status - available in Ready or Started state
+            "has-subscribers" => {
                 let state = self.state.lock().unwrap();
-                if let State::Started(ref started) = *state {
-                    started.stats.lock().unwrap().bytes_sent.to_value()
+                if let Some(has_subscribers) = state.has_subscribers() {
+                    has_subscribers.load(Ordering::Relaxed).to_value()
                 } else {
-                    0u64.to_value()
+                    false.to_value()
                 }
             }
-            "messages-sent" => {
+            // Statistics properties - only available in Started state (data is flowing)
+            "bytes-sent" | "messages-sent" | "errors" | "dropped" => {
                 let state = self.state.lock().unwrap();
                 if let State::Started(ref started) = *state {
-                    started.stats.lock().unwrap().messages_sent.to_value()
-                } else {
-                    0u64.to_value()
-                }
-            }
-            "errors" => {
-                let state = self.state.lock().unwrap();
-                if let State::Started(ref started) = *state {
-                    started.stats.lock().unwrap().errors.to_value()
-                } else {
-                    0u64.to_value()
-                }
-            }
-            "dropped" => {
-                let state = self.state.lock().unwrap();
-                if let State::Started(ref started) = *state {
-                    started.stats.lock().unwrap().dropped.to_value()
+                    let stats = started.stats.lock().unwrap();
+                    match pspec.name() {
+                        "bytes-sent" => stats.bytes_sent.to_value(),
+                        "messages-sent" => stats.messages_sent.to_value(),
+                        "errors" => stats.errors.to_value(),
+                        "dropped" => stats.dropped.to_value(),
+                        _ => unreachable!(),
+                    }
                 } else {
                     0u64.to_value()
                 }
@@ -667,10 +897,11 @@ impl BaseSinkImpl for ZenohSink {
     fn start(&self) -> Result<(), gst::ErrorMessage> {
         let mut state = self.state.lock().unwrap();
 
-        // Check if we can start from current state
+        // Check if we can start from current state (must be Ready)
         if !state.can_start() {
             let current_state = match *state {
                 State::Stopped => "Stopped",
+                State::Ready(_) => "Ready",
                 State::Starting => "Starting",
                 State::Started(_) => "Started",
                 State::Stopping => "Stopping",
@@ -690,161 +921,16 @@ impl BaseSinkImpl for ZenohSink {
             }
         }
 
-        gst::debug!(CAT, "ZenohSink transitioning from Stopped to Starting");
-        *state = State::Starting;
-        drop(state); // Release state lock before potentially long operations
+        gst::debug!(CAT, "ZenohSink transitioning from Ready to Started");
 
-        let settings = self.settings.lock().unwrap();
-        let key_expr = settings.key_expr.clone();
-        let config_file = settings.config_file.clone();
-        let priority = settings.priority;
-        let congestion_control = settings.congestion_control.clone();
-        let reliability = settings.reliability.clone();
-        let express = settings.express;
-        let external_session = settings.external_session.clone();
-        let session_group = settings.session_group.clone();
-        drop(settings);
-
-        // Validate the key expression
-        if key_expr.is_empty() {
-            return Err(gst::error_msg!(
-                gst::ResourceError::Settings,
-                ["Key expression is required"]
-            ));
-        }
-
-        // Determine session source: external (Rust API) > session-group (property) > new session
-        let session_wrapper = if let Some(shared_session) = external_session {
-            // Priority 1: External session provided via Rust API
-            gst::debug!(CAT, "Using external shared session (Rust API)");
-            SessionWrapper::Shared(shared_session)
-        } else if let Some(ref group) = session_group {
-            // Priority 2: Session group property (gst-launch compatible)
-            gst::debug!(CAT, "Using session group '{}'", group);
-            let session = crate::session::get_or_create_session(group, config_file.as_deref())
-                .map_err(|e| ZenohError::Init(e).to_error_message())?;
-            SessionWrapper::Shared(session)
-        } else {
-            // Priority 3: Create a new owned session
-            gst::debug!(CAT, "Creating new Zenoh session");
-            let config = match config_file {
-                Some(path) if !path.is_empty() => {
-                    gst::debug!(CAT, "Loading Zenoh config from {}", path);
-                    zenoh::Config::from_file(&path)
-                        .map_err(|e| ZenohError::Init(e).to_error_message())?
-                }
-                _ => zenoh::Config::default(),
-            };
-            let session = zenoh::open(config)
-                .wait()
-                .map_err(|e| ZenohError::Init(e).to_error_message())?;
-            SessionWrapper::Owned(session)
+        // Take the ReadyState and promote it to Started with render-time resources
+        let ready_state = match std::mem::replace(&mut *state, State::Starting) {
+            State::Ready(ready) => ready,
+            _ => unreachable!(),
         };
-
-        gst::debug!(
-            CAT,
-            "Creating publisher with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
-            key_expr,
-            priority,
-            congestion_control,
-            reliability,
-            express
-        );
-
-        // Use owned key_expr for static lifetime, with proper error handling
-        let owned = OwnedKeyExpr::try_from(key_expr.clone()).map_err(|e| {
-            ZenohError::KeyExpr {
-                key_expr: key_expr.clone(),
-                reason: e.to_string(),
-            }
-            .to_error_message()
-        })?;
-
-        // Parse and validate configuration options for Zenoh publisher
-
-        // Priority: Zenoh priority levels (lower numeric value = higher priority)
-        // 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data, 6=DataLow, 7=Background
-        let zenoh_priority = Priority::try_from(priority).unwrap_or(Priority::default());
-
-        // Congestion control: How to handle network congestion
-        // - Block: Wait until congestion clears (ensures delivery but may cause delays)
-        // - Drop: Drop messages during congestion (maintains throughput but may lose data)
-        let zenoh_congestion_control = match congestion_control.as_str() {
-            "block" => CongestionControl::Block,
-            "drop" => CongestionControl::Drop,
-            _ => {
-                gst::warning!(
-                    CAT,
-                    "Unknown congestion control '{}', using default",
-                    congestion_control
-                );
-                CongestionControl::Block
-            }
-        };
-
-        // Reliability: Message delivery guarantees
-        // - Reliable: Messages are acknowledged and retransmitted if lost
-        // - BestEffort: Messages sent once without delivery guarantees (lower latency)
-        let zenoh_reliability = match reliability.as_str() {
-            "reliable" => Reliability::Reliable,
-            "best-effort" => Reliability::BestEffort,
-            _ => {
-                gst::warning!(CAT, "Unknown reliability '{}', using default", reliability);
-                Reliability::BestEffort
-            }
-        };
-
-        // Create publisher with full configuration
-        // Start with the key expression and add QoS parameters
-        let mut publisher_builder = session_wrapper
-            .as_session()
-            .declare_publisher(owned)
-            .priority(zenoh_priority)
-            .congestion_control(zenoh_congestion_control)
-            .reliability(zenoh_reliability);
-
-        // Express mode: Bypass some internal queues for reduced latency
-        // Trade-off: Lower latency vs potentially higher CPU usage
-        if express {
-            publisher_builder = publisher_builder.express(true);
-        }
-
-        let publisher = publisher_builder.wait().map_err(|e| {
-            ZenohError::Publish {
-                key_expr: key_expr.clone(),
-                source: e,
-            }
-            .to_error_message()
-        })?;
-
-        gst::debug!(
-            CAT,
-            "Publisher created with key_expr='{}', priority={}, congestion_control='{}', reliability='{}', express={}",
-            key_expr,
-            priority,
-            congestion_control,
-            reliability,
-            express
-        );
-
-        // Reacquire state lock to complete transition
-        let mut state = self.state.lock().unwrap();
-
-        // Verify we're still in Starting state (not stopped during initialization)
-        if !matches!(*state, State::Starting) {
-            gst::warning!(
-                CAT,
-                "State changed during startup, aborting start operation"
-            );
-            return Err(gst::error_msg!(
-                gst::ResourceError::Settings,
-                ["State changed during startup"]
-            ));
-        }
 
         *state = State::Started(Started {
-            _session: session_wrapper,
-            publisher,
+            ready: ready_state,
             stats: Arc::new(Mutex::new(Statistics::default())),
             caps_sent: Arc::new(AtomicBool::new(false)),
             last_caps_time: Arc::new(Mutex::new(None)),
@@ -1104,7 +1190,7 @@ impl BaseSinkImpl for ZenohSink {
 
         // Send with caps attachment
         // Note: Zenoh's wait() already handles timeouts internally
-        let put_builder = started.publisher.put(&data_to_send);
+        let put_builder = started.ready.publisher.put(&data_to_send);
         let result = if let Some(attachment) = attachment {
             put_builder.attachment(attachment).wait()
         } else {
@@ -1248,7 +1334,7 @@ impl BaseSinkImpl for ZenohSink {
             })?;
 
             // Send buffer with caps attachment
-            let put_builder = started.publisher.put(b.as_slice());
+            let put_builder = started.ready.publisher.put(b.as_slice());
             let result = if let Some(ref attachment) = caps_attachment {
                 put_builder.attachment(attachment.clone()).wait()
             } else {
@@ -1328,6 +1414,7 @@ impl BaseSinkImpl for ZenohSink {
         if !state.can_stop() {
             let current_state = match *state {
                 State::Stopped => "Stopped",
+                State::Ready(_) => "Ready",
                 State::Starting => "Starting",
                 State::Started(_) => "Started",
                 State::Stopping => "Stopping",
@@ -1344,20 +1431,25 @@ impl BaseSinkImpl for ZenohSink {
             );
         }
 
-        if let State::Started(ref _started) = *state {
-            gst::debug!(CAT, "ZenohSink transitioning from Started to Stopping");
-            // Set to Stopping state temporarily
-            let _started_data = match std::mem::replace(&mut *state, State::Stopping) {
+        if let State::Started(_) = *state {
+            gst::debug!(
+                CAT,
+                "ZenohSink transitioning from Started to Ready (PAUSED→READY)"
+            );
+            // Demote Started back to Ready, keeping Zenoh resources alive
+            let started_data = match std::mem::replace(&mut *state, State::Stopping) {
                 State::Started(started) => started,
                 _ => unreachable!(),
             };
 
-            // Resources will be cleaned up when _started_data is dropped
-            gst::debug!(CAT, "ZenohSink resources cleaned up");
+            // Return to Ready state — Zenoh session, publisher, and matching
+            // listener remain active for subscriber detection.
+            *state = State::Ready(started_data.ready);
+            gst::debug!(
+                CAT,
+                "ZenohSink render resources cleaned up, Zenoh resources retained"
+            );
         }
-
-        *state = State::Stopped;
-        gst::debug!(CAT, "ZenohSink successfully transitioned to Stopped state");
 
         Ok(())
     }
@@ -1469,14 +1561,14 @@ impl URIHandlerImpl for ZenohSink {
 
         let mut settings = self.settings.lock().unwrap();
 
-        // Check if we can modify settings (not started)
+        // Check if we can modify settings (not in Ready or Started state)
         let state = self.state.lock().unwrap();
-        if state.is_started() {
+        if state.is_ready_or_started() {
             drop(state);
             drop(settings);
             return Err(glib::Error::new(
                 gst::URIError::BadState,
-                "Cannot change URI while element is started",
+                "Cannot change URI while element is in Ready or Started state",
             ));
         }
         drop(state);

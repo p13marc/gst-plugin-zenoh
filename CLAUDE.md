@@ -159,6 +159,7 @@ cargo test --test data_flow_tests       # End-to-end data transmission
 cargo test --test metadata_tests        # Buffer metadata preservation (PTS, DTS, duration)
 cargo test --test compression_tests     # Compression round-trip (requires compression feature)
 cargo test --test demux_flow_tests      # Demux pad creation and data routing
+cargo test --test matching_tests       # Subscriber matching status (has-subscribers, signal, bus message)
 ```
 
 ### Test Architecture Note
@@ -209,6 +210,9 @@ ZenohSink additional:
 - `compression`: `none`, `zstd`, `lz4`, `gzip`
 - `compression-level` (1-9): Compression level
 - `send-buffer-meta` (bool): Send buffer timing metadata (PTS, DTS, duration, flags)
+- `has-subscribers` (bool, read-only): Whether matching Zenoh subscribers currently exist
+- Signal `matching-changed(bool)`: Emitted when subscriber presence changes
+- Bus message `zenoh-matching-changed`: Posted with `has-subscribers` field on matching changes
 
 ZenohSrc additional:
 - `receive-timeout-ms` (int): Timeout for receiving samples (default: 1000)

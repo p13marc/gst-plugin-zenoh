@@ -330,6 +330,50 @@ impl ZenohSink {
     }
 
     // -------------------------------------------------------------------------
+    // Matching Status
+    // -------------------------------------------------------------------------
+
+    /// Returns whether there are currently matching Zenoh subscribers.
+    ///
+    /// This reflects the last known state from Zenoh's matching listener.
+    /// Returns `false` when the element is not started.
+    pub fn has_subscribers(&self) -> bool {
+        self.property("has-subscribers")
+    }
+
+    /// Connects to the `matching-changed` signal.
+    ///
+    /// The callback receives `true` when at least one matching subscriber
+    /// appears, and `false` when the last matching subscriber disappears.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use gstzenoh::ZenohSink;
+    ///
+    /// let sink = ZenohSink::new("demo/video");
+    /// sink.connect_matching_changed(|sink, has_subscribers| {
+    ///     if has_subscribers {
+    ///         println!("Subscribers connected for {}", sink.key_expr());
+    ///     } else {
+    ///         println!("No more subscribers for {}", sink.key_expr());
+    ///     }
+    /// });
+    /// ```
+    pub fn connect_matching_changed<F: Fn(&Self, bool) + Send + Sync + 'static>(
+        &self,
+        f: F,
+    ) -> glib::SignalHandlerId {
+        self.connect("matching-changed", false, move |values| {
+            let element = values[0].get::<gst::Element>().unwrap();
+            let sink = ZenohSink::try_from(element).unwrap();
+            let matching = values[1].get::<bool>().unwrap();
+            f(&sink, matching);
+            None
+        })
+    }
+
+    // -------------------------------------------------------------------------
     // Statistics (read-only)
     // -------------------------------------------------------------------------
 
