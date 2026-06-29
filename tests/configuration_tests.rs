@@ -105,7 +105,7 @@ fn test_zenoh_sink_priority_configuration() {
 
 #[test]
 #[serial]
-fn test_zenoh_src_reliability_configuration() {
+fn test_zenoh_src_receive_timeout_configuration() {
     gst::init().unwrap();
     gstzenoh::plugin_register_static().unwrap();
 
@@ -113,19 +113,18 @@ fn test_zenoh_src_reliability_configuration() {
         .build()
         .expect("Failed to create zenohsrc element");
 
-    src.set_property("key-expr", "test/src/best-effort");
+    src.set_property("key-expr", "test/src/timeout");
 
-    // Test best-effort reliability (default)
-    src.set_property("reliability", "best-effort");
-    assert_eq!(src.property::<String>("reliability"), "best-effort");
+    // Default receive timeout.
+    assert_eq!(src.property::<u64>("receive-timeout-ms"), 100);
 
-    // Test reliable reliability
-    src.set_property("reliability", "reliable");
-    assert_eq!(src.property::<String>("reliability"), "reliable");
+    // A valid value within range is applied.
+    src.set_property("receive-timeout-ms", 250u64);
+    assert_eq!(src.property::<u64>("receive-timeout-ms"), 250);
 
-    // Test invalid reliability (should keep previous valid value)
-    src.set_property("reliability", "invalid");
-    assert_eq!(src.property::<String>("reliability"), "reliable");
+    // The upper bound of the valid range (10-5000ms) is accepted.
+    src.set_property("receive-timeout-ms", 5000u64);
+    assert_eq!(src.property::<u64>("receive-timeout-ms"), 5000);
 }
 
 // Note: Property locking test requires actual Zenoh session which is complex to set up in unit tests
@@ -176,12 +175,12 @@ fn test_end_to_end_configuration() {
     sink.set_property("priority", 2u32); // InteractiveHigh priority
 
     src.set_property("key-expr", key_expr);
-    src.set_property("reliability", "reliable");
+    src.set_property("receive-timeout-ms", 250u64);
 
     // Verify properties are set correctly
     assert_eq!(sink.property::<String>("reliability"), "reliable");
     assert_eq!(sink.property::<String>("congestion-control"), "block");
     assert!(sink.property::<bool>("express"));
     assert_eq!(sink.property::<u32>("priority"), 2);
-    assert_eq!(src.property::<String>("reliability"), "reliable");
+    assert_eq!(src.property::<u64>("receive-timeout-ms"), 250);
 }

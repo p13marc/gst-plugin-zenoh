@@ -103,23 +103,18 @@ fn test_zenohsrc_properties() {
     let config: Option<String> = src.property("config");
     assert_eq!(config, None);
 
-    let priority: u32 = src.property("priority");
-    assert_eq!(priority, 5); // Default is Priority::Data
-
-    let congestion_control: String = src.property("congestion-control");
-    assert_eq!(congestion_control, "block");
-
-    let reliability: String = src.property("reliability");
-    assert_eq!(reliability, "best-effort");
+    // The subscriber exposes a receive-timeout, not publisher-side QoS knobs.
+    let receive_timeout: u64 = src.property("receive-timeout-ms");
+    assert_eq!(receive_timeout, 100); // Default
 
     // Test setting properties
     src.set_property("key-expr", "test/key");
     let new_key_expr: String = src.property("key-expr");
     assert_eq!(new_key_expr, "test/key");
 
-    src.set_property("priority", 6u32); // DataLow
-    let new_priority: u32 = src.property("priority");
-    assert_eq!(new_priority, 6);
+    src.set_property("receive-timeout-ms", 250u64);
+    let new_timeout: u64 = src.property("receive-timeout-ms");
+    assert_eq!(new_timeout, 250);
 }
 
 #[test]

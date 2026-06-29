@@ -72,14 +72,16 @@ and crates.io publishing.
 - Raised MSRV to **1.96** (required by gstreamer 0.25; pinned toolchain for 0.5.0).
 - Removed unused dependencies `futures` and `zenoh-config`.
 
+### Removed (breaking)
+- Removed the informational-only `zenohsrc` QoS properties `priority`,
+  `congestion-control`, and `reliability` (and the matching `ZenohSrcBuilder`
+  methods / typed getters / URI query params). They never reached the subscribe
+  path — these are publisher-side QoS; a subscriber adapts reliability from the
+  publisher automatically. Set them on `zenohsink` instead.
+
 ### Changed
 - **Wire-format note:** the compression payload format changed (self-describing
   frame). 0.4.0 was never published, so this affects no released build.
-
-### Known follow-ups
-- The informational-only `zenohsrc` QoS properties (`priority`,
-  `congestion-control`, `reliability`) have no effect on the subscribe path and
-  are slated for removal in a dedicated change (Epic #6, §4.8).
 
 ## [0.4.0] - 2026-02-19
 

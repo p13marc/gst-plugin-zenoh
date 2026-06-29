@@ -150,9 +150,7 @@ fn test_zenoh_properties_integration() {
 
     let src = gst::ElementFactory::make("zenohsrc")
         .property("key-expr", "test/properties")
-        .property("priority", 3u32) // InteractiveLow priority
-        .property("congestion-control", "block")
-        .property("reliability", "best-effort")
+        .property("receive-timeout-ms", 250u64)
         .build()
         .expect("Failed to create zenohsrc");
 
@@ -166,8 +164,8 @@ fn test_zenoh_properties_integration() {
     let sink_reliability: String = sink.property("reliability");
     assert_eq!(sink_reliability, "reliable");
 
-    let src_priority: u32 = src.property("priority");
-    assert_eq!(src_priority, 3);
+    let src_timeout: u64 = src.property("receive-timeout-ms");
+    assert_eq!(src_timeout, 250);
 
     // Test state transitions with these properties
     assert!(sink.set_state(gst::State::Ready).is_ok());

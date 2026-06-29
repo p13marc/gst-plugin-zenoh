@@ -121,12 +121,6 @@ struct Settings {
     key_expr: String,
     /// Optional path to Zenoh configuration file
     config_file: Option<String>,
-    /// Subscriber priority level (1-7: 1=RealTime, 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background)
-    priority: u8,
-    /// Congestion control policy: "block" or "drop" (informational for subscriber)
-    congestion_control: String,
-    /// Reliability mode: "best-effort" or "reliable" (matches publisher settings)
-    reliability: String,
     /// Receive timeout in milliseconds for polling Zenoh subscriber
     /// Affects CPU usage vs responsiveness tradeoff (lower = more responsive but higher CPU)
     receive_timeout_ms: u64,
@@ -143,9 +137,6 @@ impl Default for Settings {
         Self {
             key_expr: String::new(),
             config_file: None,
-            priority: 5, // Default to Priority::Data
-            congestion_control: "block".into(),
-            reliability: "best-effort".into(),
             receive_timeout_ms: 100, // 100ms default for good responsiveness
             apply_buffer_meta: true, // Default to applying buffer timing metadata
             external_session: None,
@@ -244,29 +235,6 @@ impl ObjectImpl for ZenohSrc {
                     .blurb("Path to Zenoh configuration file for custom network settings (JSON5 format)")
                     .build(),
 
-                // Priority property
-                glib::ParamSpecUInt::builder("priority")
-                    .nick("Subscriber Priority")
-                    .blurb("Message priority level: 1=RealTime(highest), 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background(lowest)")
-                    .default_value(5)
-                    .minimum(1)
-                    .maximum(7)
-                    .build(),
-
-                // Congestion control property
-                glib::ParamSpecString::builder("congestion-control")
-                    .nick("Congestion Control")
-                    .blurb("Congestion control preference (informational): 'block' or 'drop'. Actual behavior depends on publisher settings.")
-                    .default_value(Some("block"))
-                    .build(),
-
-                // Reliability property
-                glib::ParamSpecString::builder("reliability")
-                    .nick("Reliability Mode")
-                    .blurb("Expected reliability mode (informational): 'best-effort' or 'reliable'. Actual reliability is determined by publisher.")
-                    .default_value(Some("best-effort"))
-                    .build(),
-
                 // Receive timeout property
                 glib::ParamSpecUInt64::builder("receive-timeout-ms")
                     .nick("Receive Timeout")
@@ -314,17 +282,7 @@ impl ObjectImpl for ZenohSrc {
     fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
         // Check if we're in a state where property changes are allowed
         let state = self.state.lock().unwrap();
-        if state.is_started()
-            && matches!(
-                pspec.name(),
-                "key-expr"
-                    | "config"
-                    | "reliability"
-                    | "congestion-control"
-                    | "priority"
-                    | "session-group"
-            )
-        {
+        if state.is_started() && matches!(pspec.name(), "key-expr" | "config" | "session-group") {
             gst::warning!(
                 CAT,
                 "Cannot change property '{}' while element is started",
@@ -344,44 +302,6 @@ impl ObjectImpl for ZenohSrc {
                 settings.config_file = value
                     .get::<Option<String>>()
                     .expect("type checked upstream");
-            }
-            "priority" => {
-                let priority_val = value.get::<u32>().expect("type checked upstream") as u8;
-                // Validate priority range
-                if (1..=7).contains(&priority_val) {
-                    settings.priority = priority_val;
-                } else {
-                    gst::warning!(
-                        CAT,
-                        "Invalid priority value '{}', must be 1-7, using default",
-                        priority_val
-                    );
-                    settings.priority = 5; // Default to Priority::Data
-                }
-            }
-            "congestion-control" => {
-                let control = value.get::<String>().expect("type checked upstream");
-                // Validate value
-                match control.as_str() {
-                    "block" | "drop" => settings.congestion_control = control,
-                    _ => gst::warning!(
-                        CAT,
-                        "Invalid congestion control value '{}', using default",
-                        control
-                    ),
-                }
-            }
-            "reliability" => {
-                let reliability = value.get::<String>().expect("type checked upstream");
-                // Validate value
-                match reliability.as_str() {
-                    "best-effort" | "reliable" => settings.reliability = reliability,
-                    _ => gst::warning!(
-                        CAT,
-                        "Invalid reliability value '{}', using default",
-                        reliability
-                    ),
-                }
             }
             "receive-timeout-ms" => {
                 let timeout = value.get::<u64>().expect("type checked upstream");
@@ -413,15 +333,12 @@ impl ObjectImpl for ZenohSrc {
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
         match pspec.name() {
             // Configuration properties - read from settings
-            "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
-            | "receive-timeout-ms" | "apply-buffer-meta" | "session-group" => {
+            "key-expr" | "config" | "receive-timeout-ms" | "apply-buffer-meta"
+            | "session-group" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
                     "config" => settings.config_file.to_value(),
-                    "priority" => (settings.priority as u32).to_value(),
-                    "congestion-control" => settings.congestion_control.to_value(),
-                    "reliability" => settings.reliability.to_value(),
                     "receive-timeout-ms" => settings.receive_timeout_ms.to_value(),
                     "apply-buffer-meta" => settings.apply_buffer_meta.to_value(),
                     "session-group" => settings.session_group.to_value(),
@@ -512,9 +429,6 @@ impl BaseSrcImpl for ZenohSrc {
         let settings = self.settings.lock().unwrap();
         let key_expr = settings.key_expr.clone();
         let config_file = settings.config_file.clone();
-        let priority = settings.priority;
-        let congestion_control = settings.congestion_control.clone();
-        let reliability = settings.reliability.clone();
         let external_session = settings.external_session.clone();
         let session_group = settings.session_group.clone();
         drop(settings);
@@ -569,14 +483,7 @@ impl BaseSrcImpl for ZenohSrc {
             SessionWrapper::Owned(session)
         };
 
-        gst::debug!(
-            CAT,
-            "Creating subscriber with key_expr='{}', priority={}, congestion_control='{}', reliability='{}'",
-            key_expr,
-            priority,
-            congestion_control,
-            reliability
-        );
+        gst::debug!(CAT, "Creating subscriber with key_expr='{}'", key_expr);
 
         // Note: Zenoh subscriber reliability is automatically determined by the publisher
         //
@@ -1065,18 +972,6 @@ impl URIHandlerImpl for ZenohSrc {
         if let Some(ref config) = settings.config_file {
             params.push(format!("config={}", urlencoding::encode(config)));
         }
-        if settings.priority != 5 {
-            params.push(format!("priority={}", settings.priority));
-        }
-        if settings.congestion_control != "block" {
-            params.push(format!(
-                "congestion-control={}",
-                settings.congestion_control
-            ));
-        }
-        if settings.reliability != "best-effort" {
-            params.push(format!("reliability={}", settings.reliability));
-        }
         if settings.receive_timeout_ms != 100 {
             params.push(format!(
                 "receive-timeout-ms={}",
@@ -1162,32 +1057,6 @@ impl URIHandlerImpl for ZenohSrc {
 
                     match key {
                         "config" => settings.config_file = Some(value),
-                        "priority" => {
-                            settings.priority = value.parse().map_err(|_| {
-                                glib::Error::new(
-                                    gst::URIError::BadUri,
-                                    &format!("Invalid priority value: {}", value),
-                                )
-                            })?;
-                        }
-                        "congestion-control" => {
-                            if value != "block" && value != "drop" {
-                                return Err(glib::Error::new(
-                                    gst::URIError::BadUri,
-                                    &format!("Invalid congestion-control value: {}", value),
-                                ));
-                            }
-                            settings.congestion_control = value;
-                        }
-                        "reliability" => {
-                            if value != "best-effort" && value != "reliable" {
-                                return Err(glib::Error::new(
-                                    gst::URIError::BadUri,
-                                    &format!("Invalid reliability value: {}", value),
-                                ));
-                            }
-                            settings.reliability = value;
-                        }
                         "receive-timeout-ms" => {
                             let timeout: u64 = value.parse().map_err(|_| {
                                 glib::Error::new(

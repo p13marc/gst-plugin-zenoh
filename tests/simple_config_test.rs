@@ -70,21 +70,15 @@ fn test_zenoh_src_properties() {
 
     // Test default values
     assert_eq!(src.property::<String>("key-expr"), "");
-    assert_eq!(src.property::<u32>("priority"), 5); // Default Priority::Data
-    assert_eq!(src.property::<String>("congestion-control"), "block");
-    assert_eq!(src.property::<String>("reliability"), "best-effort");
+    assert_eq!(src.property::<u64>("receive-timeout-ms"), 100); // Default
 
     // Test setting properties
     src.set_property("key-expr", "test/src/config");
-    src.set_property("priority", 3u32); // InteractiveLow
-    src.set_property("congestion-control", "drop");
-    src.set_property("reliability", "reliable");
+    src.set_property("receive-timeout-ms", 250u64);
 
     // Verify properties were set
     assert_eq!(src.property::<String>("key-expr"), "test/src/config");
-    assert_eq!(src.property::<u32>("priority"), 3);
-    assert_eq!(src.property::<String>("congestion-control"), "drop");
-    assert_eq!(src.property::<String>("reliability"), "reliable");
+    assert_eq!(src.property::<u64>("receive-timeout-ms"), 250);
 }
 
 #[test]

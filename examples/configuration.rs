@@ -210,8 +210,10 @@ fn priority_example() -> Result<(), Error> {
         .priority(7) // Background priority
         .build();
 
+    // Priority is a publisher-side QoS, so it applies to the sink only. The
+    // subscriber (src) instead tunes its receive polling timeout.
     let src_default = ZenohSrc::builder("config/example/default-priority")
-        .priority(5) // Data priority (default)
+        .receive_timeout_ms(100)
         .build();
 
     println!(
@@ -219,7 +221,10 @@ fn priority_example() -> Result<(), Error> {
     );
     println!("  RealTime priority sink: {}", sink_realtime.priority());
     println!("  Background priority sink: {}", sink_background.priority());
-    println!("  Default priority src: {}", src_default.priority());
+    println!(
+        "  Src receive timeout (ms): {}",
+        src_default.receive_timeout_ms()
+    );
 
     // Test state transitions
     sink_realtime.set_state(gst::State::Ready)?;
