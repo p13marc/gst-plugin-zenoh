@@ -5,6 +5,67 @@ All notable changes to gst-plugin-zenoh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-29
+
+The **0.5.0 correctness milestone**: four P0 bug-fix epics plus CI quality gates
+and crates.io publishing.
+
+### Fixed
+
+#### Concurrency & shutdown safety (Epic #2)
+- `render()`/`render_list()` (sink) and `create()` (src) no longer hold the `state`
+  mutex across blocking Zenoh I/O, so statistics stay readable while data flows and
+  state changes never serialize behind publishes/receives.
+- Publishing now runs on a persistent worker thread with a bounded, cancellable
+  hand-off, so tearing a pipeline down (Ctrl-C) with no subscriber under
+  `congestion-control=block` no longer hangs.
+- New `publish-timeout-ms` property (default 5000) bounds each publish; session
+  open is timeout-bounded so a bad router can't stall the state-change thread.
+- Hot-path locks are poison-tolerant.
+
+#### Error handling & session lifecycle (Epic #3)
+- Replaced fragile string-matching error classification with typed error handling
+  (`recv_timeout` timeout vs. disconnect) in src and demux; a benign receive
+  timeout never tears down the stream.
+- Reworked the shared-session registry to reference-count sessions, open them
+  outside the lock, warn on config mismatch, and close on last release — no leaks.
+
+#### zenohdemux correctness (Epic #4)
+- Removed the duplicated subscriber; keyed the pad map by full key expression and
+  disambiguate colliding pad names so distinct keys never share a pad.
+- Replaced a stdlib-unstable hash with a stable FNV-1a for `hash` pad naming.
+- The receiver thread no longer panics on pad-creation failure — it posts a bus
+  error and increments `errors`.
+- Pushes EOS to dynamic pads on stop and emits `no-more-pads` via a quiescence
+  timer (new `no-more-pads-timeout-ms`, default 500) so auto-pluggers finalize.
+- New read-only `errors` statistic.
+
+#### Compression & batched render (Epic #5)
+- Self-describing compression frame (magic + algorithm + version): a receiver
+  missing the required feature now fails with a clear error instead of forwarding
+  garbage.
+- Fixed the inverted LZ4 level (higher level → better compression) and removed the
+  16 MB LZ4 decompression ceiling (length-prefixed frames round-trip at any size).
+- `render_list` now encodes (compression + buffer metadata) identically to single
+  `render`; promoted compression to a first-class metadata field.
+
+### Removed
+- Dead `dropped` statistic on `zenohsink` (block/drop is handled Zenoh-side and is
+  not observable); to be reintroduced with a ring-buffer handler in a later release.
+
+### CI, quality gates & publishing (Epic #7)
+- CI now runs a feature matrix (default + each `compression-*` + `compression`), so
+  the compression tests actually run, plus `clippy -D warnings`, `cargo fmt --check`,
+  a release-mode test run, an MSRV job, and `cargo-deny`/`cargo-audit`.
+- Declared MSRV corrected to **1.88** (the crate uses stabilized `let` chains).
+- Release workflow gained a tag-triggered `cargo publish` job and builds **x86_64
+  and arm64** `.deb`/`.rpm`/tarball packages; the Fedora RPM suffix is derived from
+  the container instead of being hardcoded.
+
+### Changed
+- **Wire-format note:** the compression payload format changed (self-describing
+  frame). 0.4.0 was never published, so this affects no released build.
+
 ## [0.4.0] - 2026-02-19
 
 ### Added

@@ -45,6 +45,26 @@ gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video
 gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 ```
 
+### Demultiplexing multiple streams (zenohdemux)
+
+`zenohdemux` subscribes to a wildcard key expression and creates one dynamic
+source pad per unique key it sees — ideal for fanning many publishers into a
+single pipeline:
+
+```bash
+# Publishers on distinct keys under demo/cameras/*
+gst-launch-1.0 videotestsrc pattern=ball ! zenohsink key-expr=demo/cameras/front
+gst-launch-1.0 videotestsrc pattern=snow ! zenohsink key-expr=demo/cameras/back
+
+# One demux subscribes to all of them and plugs each into decodebin
+gst-launch-1.0 zenohdemux key-expr=demo/cameras/* \
+  ! decodebin ! videoconvert ! autovideosink
+```
+
+Pad names follow the `pad-naming` property (`full-path`, `last-segment`, or
+`hash`). Colliding names are disambiguated automatically so distinct keys never
+share a pad. See the Rust API for `ZenohDemux`/`PadNaming`.
+
 ## Features
 
 - **QoS Control**: Reliability modes, congestion control, priority levels (1-7)
@@ -56,7 +76,7 @@ gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 - **Buffer Metadata**: PTS, DTS, duration, flags preserved for A/V sync
 - **Caps Transmission**: Automatic format negotiation between sender/receiver
 - **URI Handler**: Configure via `zenoh:key-expr?priority=2&reliability=reliable`
-- **Statistics**: Real-time monitoring of bytes, messages, errors, dropped packets
+- **Statistics**: Real-time monitoring of bytes, messages, and errors
 
 ## Rust API
 
@@ -138,13 +158,72 @@ gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 |--------|----------|--------|
 | `compression=none` | Any build | Works |
 | `compression=zstd` | Built with `compression-zstd` | Works |
-| `compression=zstd` | Built without compression | Error logged, raw compressed bytes delivered |
+| `compression=zstd` | Built without the matching feature | Clear decode error (self-describing frame is detected; no garbage is delivered) |
+
+Each compressed payload carries a small self-describing header (magic + algorithm + version), so a receiver missing the required feature fails with an explicit error instead of forwarding corrupt data.
 
 **Recommendation**: Build both sender and receiver with the same compression features, or use `--features compression` for full compatibility.
 
+## Configuration
+
+By default each element opens a Zenoh session in **peer** mode with multicast
+scouting, so senders and receivers on the same LAN discover each other with no
+configuration. For other topologies, point the `config` property at a Zenoh
+JSON5 config file:
+
+```bash
+gst-launch-1.0 zenohsrc key-expr=demo/video config=/etc/zenoh/client.json5 \
+  ! videoconvert ! autovideosink
+```
+
+A minimal config that connects to a known router instead of relying on
+multicast discovery:
+
+```json5
+{
+  mode: "client",
+  connect: {
+    endpoints: ["tcp/192.168.1.10:7447"],
+  },
+}
+```
+
+The file accepts the full Zenoh configuration schema (transports, scouting,
+QoS, access control, …); see the [Zenoh configuration docs](https://zenoh.io/docs/manual/configuration/).
+
+### Multi-node / router deployment
+
+For deployments that span subnets (where multicast scouting does not reach), run
+a `zenohd` router and have each element connect to it via `config`:
+
+```bash
+# On the router host
+zenohd
+
+# Sender — connects to the router, publishes
+gst-launch-1.0 videotestsrc ! zenohsink key-expr=demo/video config=router.json5
+
+# Receiver anywhere that can reach the router
+gst-launch-1.0 zenohsrc key-expr=demo/video config=router.json5 \
+  ! videoconvert ! autovideosink
+```
+
+where `router.json5` contains `{ mode: "client", connect: { endpoints: ["tcp/ROUTER_HOST:7447"] } }`.
+
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---------|--------------------|
+| `gst-inspect-1.0 zenohsink` says "No such element" | Plugin not on the scan path — `export GST_PLUGIN_PATH=target/release` (or the install dir). |
+| Receiver gets no data | Key expressions don't match, or the peers can't discover each other. Verify both sides use intersecting keys and, across subnets, a shared `config` pointing at a router. |
+| Pipeline hangs on Ctrl-C with no subscriber | Fixed in 0.5.0 (bounded publish). On older builds, set a finite `publish-timeout-ms`. |
+| Receiver logs a compression/decode error | The payload was compressed with an algorithm the receiver wasn't built with — rebuild it with the matching `compression-*` feature (or `--features compression`). |
+| `zenohdemux` produces no pads | No samples matched `key-expr` yet; pads are created lazily on first sample per key. |
+| Want protocol-level logs | Set `RUST_LOG=zenoh=debug` (and `GST_DEBUG=zenoh*:5` for element logs). |
+
 ## Requirements
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.88+ (edition 2024)
 - GStreamer 1.20+
 
 ## License
