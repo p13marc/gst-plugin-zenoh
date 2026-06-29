@@ -10,17 +10,24 @@ on:
         description: "Version to build (e.g., 0.5.0)"
         required: false
         type: string
+      publish:
+        description: "Publish the crate to crates.io (manual opt-in; off by default)"
+        required: false
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Publish the crate to crates.io on a version tag. Runs first so a failed
-  # verification build blocks the package/release jobs from a half-published tag.
+  # Publish the crate to crates.io. Deliberately NOT automatic: pushing a version
+  # tag builds packages and the GitHub release but does NOT publish to crates.io.
+  # To publish, trigger this workflow manually (workflow_dispatch) with the
+  # `publish` input checked. This avoids irreversible auto-publishes from tags.
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
     steps:
       - uses: actions/checkout@v4
 

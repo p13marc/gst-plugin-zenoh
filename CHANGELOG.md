@@ -57,9 +57,11 @@ and crates.io publishing.
 - CI now runs a feature matrix (default + each `compression-*` + `compression`), so
   the compression tests actually run, plus `clippy -D warnings`, `cargo fmt --check`,
   a release-mode test run, an MSRV job, and `cargo-deny`/`cargo-audit`.
-- Release workflow gained a tag-triggered `cargo publish` job and builds **x86_64
-  and arm64** `.deb`/`.rpm`/tarball packages; the Fedora RPM suffix is derived from
-  the container instead of being hardcoded.
+- Release workflow builds **x86_64 and arm64** `.deb`/`.rpm`/tarball packages; the
+  Fedora RPM suffix is derived from the container instead of being hardcoded.
+- crates.io publishing is a **manual, opt-in** action: pushing a version tag builds
+  packages and the GitHub release but never auto-publishes. To publish, run the
+  release workflow manually with the `publish` input checked.
 - Added a `cargo-machete` CI gate for unused dependencies.
 
 ### Dependencies & toolchain (Epic #6)
