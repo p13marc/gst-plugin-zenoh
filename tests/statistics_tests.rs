@@ -17,12 +17,10 @@ fn test_zenohsink_statistics_initial_values() {
     let bytes_sent: u64 = sink.property("bytes-sent");
     let messages_sent: u64 = sink.property("messages-sent");
     let errors: u64 = sink.property("errors");
-    let dropped: u64 = sink.property("dropped");
 
     assert_eq!(bytes_sent, 0, "Initial bytes-sent should be 0");
     assert_eq!(messages_sent, 0, "Initial messages-sent should be 0");
     assert_eq!(errors, 0, "Initial errors should be 0");
-    assert_eq!(dropped, 0, "Initial dropped should be 0");
 }
 
 #[test]
@@ -212,7 +210,7 @@ fn test_statistics_properties_exist() {
         .expect("Failed to create zenohsrc");
 
     // Verify all statistics properties exist and are readable
-    let sink_props = ["bytes-sent", "messages-sent", "errors", "dropped"];
+    let sink_props = ["bytes-sent", "messages-sent", "errors"];
     for prop in &sink_props {
         let value: u64 = sink.property(prop);
         println!("zenohsink.{} = {}", prop, value);
@@ -263,11 +261,9 @@ fn test_statistics_types() {
     let bytes_sent: u64 = sink.property("bytes-sent");
     let messages_sent: u64 = sink.property("messages-sent");
     let errors: u64 = sink.property("errors");
-    let dropped: u64 = sink.property("dropped");
 
     // Type checking is done at compile time, so if we get here, types are correct
     assert_eq!(bytes_sent, 0);
     assert_eq!(messages_sent, 0);
     assert_eq!(errors, 0);
-    assert_eq!(dropped, 0);
 }

@@ -816,11 +816,10 @@ impl PushSrcImpl for ZenohSrc {
                         }
                     }
 
-                    // Check for compression metadata
+                    // Check for compression metadata (first-class field).
                     let compression = metadata
-                        .user_metadata()
-                        .get(crate::metadata::keys::COMPRESSION)
-                        .and_then(|v| crate::compression::CompressionType::from_metadata_value(v));
+                        .compression()
+                        .and_then(crate::compression::CompressionType::from_metadata_value);
 
                     // Log any user metadata
                     if !metadata.user_metadata().is_empty() {
@@ -851,6 +850,25 @@ impl PushSrcImpl for ZenohSrc {
         let parsed_metadata = if let Some(attachment) = sample.attachment() {
             match MetadataParser::parse(attachment) {
                 Ok(metadata) => {
+                    // This build has no compression features. If the sender compressed
+                    // the payload, we cannot decode it — fail clearly instead of pushing
+                    // compressed bytes downstream as if they were raw.
+                    if let Some(algo) = metadata.compression()
+                        && algo != "none"
+                    {
+                        stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                        gst::element_imp_error!(
+                            self,
+                            gst::StreamError::Decode,
+                            [
+                                "Received '{}'-compressed payload but this build has no \
+                                 compression features enabled",
+                                algo
+                            ]
+                        );
+                        return Err(gst::FlowError::Error);
+                    }
+
                     // If caps are present in metadata, set them on the source pad
                     if let Some(caps) = metadata.caps() {
                         gst::debug!(CAT, imp = self, "Received caps from metadata: {}", caps);

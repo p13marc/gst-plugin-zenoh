@@ -49,6 +49,7 @@ pub struct MetadataBuilder {
     offset_end: Option<u64>,
     flags: Option<gst::BufferFlags>,
     key_expr: Option<String>,
+    compression: Option<String>,
     user_metadata: HashMap<String, String>,
 }
 
@@ -67,7 +68,9 @@ impl MetadataBuilder {
     /// Set buffer timing information from a GStreamer buffer
     ///
     /// This extracts PTS, DTS, duration, offset, offset_end, and flags from the buffer.
-    pub fn buffer_timing(mut self, buffer: &gst::Buffer) -> Self {
+    /// Accepts `&gst::BufferRef` so both owned buffers (`render`) and buffer-list
+    /// items (`render_list`) can use the same encode path.
+    pub fn buffer_timing(mut self, buffer: &gst::BufferRef) -> Self {
         self.pts = buffer.pts();
         self.dts = buffer.dts();
         self.duration = buffer.duration();
@@ -114,6 +117,15 @@ impl MetadataBuilder {
     /// Set the Zenoh key expression
     pub fn key_expr(mut self, key_expr: impl Into<String>) -> Self {
         self.key_expr = Some(key_expr.into());
+        self
+    }
+
+    /// Set the payload compression algorithm as a first-class field (e.g. "zstd").
+    ///
+    /// This is carried as a reserved top-level key, not smuggled through the
+    /// `user.*` namespace, so a receiver can reliably detect a compressed payload.
+    pub fn compression(mut self, algorithm: impl Into<String>) -> Self {
+        self.compression = Some(algorithm.into());
         self
     }
 
@@ -172,6 +184,11 @@ impl MetadataBuilder {
             // Escape newlines in key expression (unlikely but safe)
             let key_expr_escaped = key_expr.replace('\n', "\\n");
             parts.push(format!("{}={}", keys::KEY_EXPR, key_expr_escaped));
+        }
+
+        // Add compression as a first-class field (not smuggled through user.*).
+        if let Some(compression) = self.compression {
+            parts.push(format!("{}={}", keys::COMPRESSION, compression));
         }
 
         // Add user metadata
@@ -263,6 +280,7 @@ pub struct MetadataParser {
     offset_end: Option<u64>,
     flags: Option<gst::BufferFlags>,
     key_expr: Option<String>,
+    compression: Option<String>,
     user_metadata: HashMap<String, String>,
     version: Option<String>,
 }
@@ -332,6 +350,9 @@ impl MetadataParser {
                 keys::KEY_EXPR => {
                     parser.key_expr = Some(value_unescaped);
                 }
+                keys::COMPRESSION => {
+                    parser.compression = Some(value_unescaped);
+                }
                 k if k.starts_with(keys::USER_PREFIX) => {
                     let user_key = k.trim_start_matches(keys::USER_PREFIX);
                     parser
@@ -350,6 +371,11 @@ impl MetadataParser {
     /// Get the parsed caps, if any
     pub fn caps(&self) -> Option<&gst::Caps> {
         self.caps.as_ref()
+    }
+
+    /// Get the payload compression algorithm, if the message is compressed.
+    pub fn compression(&self) -> Option<&str> {
+        self.compression.as_deref()
     }
 
     /// Get the presentation timestamp

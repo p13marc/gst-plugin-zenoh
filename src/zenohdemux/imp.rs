@@ -662,15 +662,11 @@ impl ZenohDemux {
                     let (final_data, metadata) = if let Some(attachment) = sample.attachment() {
                         match MetadataParser::parse(attachment) {
                             Ok(meta) => {
-                                // Check for compression
-                                if let Some(comp_str) =
-                                    meta.user_metadata().get(crate::metadata::keys::COMPRESSION)
-                                {
-                                    if let Some(comp_type) =
-                                        crate::compression::CompressionType::from_metadata_value(
-                                            comp_str,
-                                        )
-                                    {
+                                // Check for compression (first-class field).
+                                match meta.compression().and_then(
+                                    crate::compression::CompressionType::from_metadata_value,
+                                ) {
+                                    Some(comp_type) => {
                                         match crate::compression::decompress(&data, comp_type) {
                                             Ok(decompressed) => (decompressed, Some(meta)),
                                             Err(e) => {
@@ -679,11 +675,8 @@ impl ZenohDemux {
                                                 continue;
                                             }
                                         }
-                                    } else {
-                                        (data.to_vec(), Some(meta))
                                     }
-                                } else {
-                                    (data.to_vec(), Some(meta))
+                                    None => (data.to_vec(), Some(meta)),
                                 }
                             }
                             Err(e) => {
@@ -702,7 +695,24 @@ impl ZenohDemux {
                     )))]
                     let (final_data, metadata) = if let Some(attachment) = sample.attachment() {
                         match MetadataParser::parse(attachment) {
-                            Ok(meta) => (data.to_vec(), Some(meta)),
+                            Ok(meta) => {
+                                // No compression features in this build: if the payload
+                                // is compressed, skip it with an error rather than push
+                                // compressed bytes downstream as raw data.
+                                if let Some(algo) = meta.compression()
+                                    && algo != "none"
+                                {
+                                    gst::warning!(
+                                        CAT,
+                                        "Received '{}'-compressed payload but this build has no \
+                                         compression features enabled; dropping sample",
+                                        algo
+                                    );
+                                    stats.lock().unwrap().errors += 1;
+                                    continue;
+                                }
+                                (data.to_vec(), Some(meta))
+                            }
                             Err(e) => {
                                 gst::warning!(CAT, "Failed to parse metadata: {}", e);
                                 (data.to_vec(), None)

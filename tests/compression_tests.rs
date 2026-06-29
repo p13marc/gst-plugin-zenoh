@@ -184,6 +184,122 @@ fn compression_roundtrip_test(compression: CompressionType, level: i32, data_siz
     );
 }
 
+/// Buffers pushed as a *buffer list* must get the same compression AND
+/// buffer-timing metadata as single-buffer render() (Epic #5 render_list parity).
+#[cfg(feature = "compression-zstd")]
+#[test]
+#[serial]
+#[allow(clippy::type_complexity)]
+fn test_render_list_compression_and_meta_parity() {
+    init();
+
+    let key_expr = unique_key_expr("comp_render_list");
+    let zenoh_session = zenoh::open(zenoh::Config::default())
+        .wait()
+        .expect("Failed to open Zenoh session");
+
+    // Capture (data, pts) of the first received buffer.
+    let received: Arc<Mutex<Option<(Vec<u8>, Option<u64>)>>> = Arc::new(Mutex::new(None));
+    let received_clone = received.clone();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop_flag.clone();
+
+    let recv_pipeline = gst::Pipeline::new();
+    let zenohsrc = gstzenoh::ZenohSrc::builder(&key_expr)
+        .session(zenoh_session.clone())
+        .receive_timeout_ms(50)
+        .apply_buffer_meta(true)
+        .build();
+    let fakesink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .unwrap();
+    let src_elem: gst::Element = zenohsrc.clone().upcast();
+    recv_pipeline.add_many([&src_elem, &fakesink]).unwrap();
+    src_elem.link(&fakesink).unwrap();
+
+    let srcpad = zenohsrc.static_pad("src").unwrap();
+    srcpad.add_probe(gst::PadProbeType::BUFFER, move |_, probe_info| {
+        if let Some(gst::PadProbeData::Buffer(ref buffer)) = probe_info.data {
+            let map = buffer.map_readable().unwrap();
+            *received_clone.lock().unwrap() =
+                Some((map.to_vec(), buffer.pts().map(|p| p.nseconds())));
+        }
+        gst::PadProbeReturn::Remove
+    });
+
+    recv_pipeline.set_state(gst::State::Playing).unwrap();
+    thread::sleep(Duration::from_millis(500));
+
+    let send_pipeline = gst::Pipeline::new();
+    let appsrc = gst_app::AppSrc::builder().format(gst::Format::Time).build();
+    let zenohsink = gstzenoh::ZenohSink::builder(&key_expr)
+        .session(zenoh_session.clone())
+        .build();
+    let sink_elem: gst::Element = zenohsink.clone().upcast();
+    sink_elem.set_property("compression", CompressionType::Zstd);
+    sink_elem.set_property("compression-level", 5i32);
+    sink_elem.set_property("send-buffer-meta", true);
+
+    let appsrc_elem: gst::Element = appsrc.clone().upcast();
+    send_pipeline.add_many([&appsrc_elem, &sink_elem]).unwrap();
+    appsrc_elem.link(&sink_elem).unwrap();
+    send_pipeline.set_state(gst::State::Playing).unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    // Highly-compressible payload, with a distinctive PTS, pushed as a buffer LIST.
+    let payload = generate_test_data(8192);
+    let pts_ns: u64 = 1_234_567_890;
+    let payload_clone = payload.clone();
+
+    let sender_thread = thread::spawn(move || {
+        while !stop_clone.load(Ordering::SeqCst) {
+            let mut list = gst::BufferList::new();
+            {
+                let list_mut = list.get_mut().unwrap();
+                let mut buffer = gst::Buffer::with_size(payload_clone.len()).unwrap();
+                {
+                    let b = buffer.get_mut().unwrap();
+                    b.copy_from_slice(0, &payload_clone).unwrap();
+                    b.set_pts(gst::ClockTime::from_nseconds(pts_ns));
+                }
+                list_mut.add(buffer);
+            }
+            if appsrc.push_buffer_list(list).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(30));
+        }
+        appsrc.end_of_stream().ok();
+    });
+
+    let start = Instant::now();
+    while received.lock().unwrap().is_none() && start.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    stop_flag.store(true, Ordering::SeqCst);
+    let _ = send_pipeline.set_state(gst::State::Null);
+    sender_thread.join().expect("Sender thread panicked");
+    stop_pipeline_with_timeout(&recv_pipeline, Duration::from_secs(1));
+
+    let received = received.lock().unwrap();
+    let (data, pts) = received
+        .as_ref()
+        .expect("No data received from buffer list");
+    // Data must round-trip (i.e. it was compressed by render_list and decompressed).
+    assert_eq!(
+        data, &payload,
+        "buffer-list payload should round-trip via compression"
+    );
+    // Buffer timing metadata must be carried by render_list too.
+    assert_eq!(
+        pts,
+        &Some(pts_ns),
+        "render_list must carry buffer-timing metadata"
+    );
+}
+
 /// Test no compression (baseline)
 #[test]
 #[serial]
