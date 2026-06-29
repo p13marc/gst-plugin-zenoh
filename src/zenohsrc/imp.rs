@@ -1,6 +1,11 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
+
+use zenoh::handlers::{Callback, FifoChannelHandler, IntoHandler};
+use zenoh::pubsub::Subscriber;
+use zenoh::sample::Sample;
 
 use gst::subclass::prelude::URIHandlerImpl;
 use gst::{glib, prelude::*, subclass::prelude::*};
@@ -30,16 +35,182 @@ struct Statistics {
     errors: u64,
 }
 
+/// Receive-handler strategy for the Zenoh subscriber.
+///
+/// `Fifo` (default) is the lossless, unbounded handler — every sample is queued
+/// in order. `Ring` keeps only the most recent `queue-depth` samples, dropping
+/// the oldest when full; this bounds latency build-up for live sources (e.g. RTP
+/// video) where staleness is worse than loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum HandlerMode {
+    #[default]
+    Fifo,
+    Ring,
+}
+
+impl HandlerMode {
+    /// Parse the property nick (`"fifo"` / `"ring"`); `None` if unrecognized.
+    fn from_nick(s: &str) -> Option<Self> {
+        match s {
+            "fifo" => Some(Self::Fifo),
+            "ring" => Some(Self::Ring),
+            _ => None,
+        }
+    }
+
+    fn as_nick(self) -> &'static str {
+        match self {
+            Self::Fifo => "fifo",
+            Self::Ring => "ring",
+        }
+    }
+}
+
+/// Generic bounded "keep latest N" buffer that drops — and counts — the oldest
+/// element when full.
+///
+/// Extracted from the handler so the drop-oldest accounting is unit-tested
+/// directly: the handler is `Sample`-typed and `Sample` has no public
+/// constructor, so the logic is exercised here with a testable element type.
+/// Mirrors Zenoh's own `RingChannel`, but the built-in ring drops silently
+/// whereas this one records every eviction for the `dropped` stat.
+struct CountingRing<T> {
+    ring: Mutex<VecDeque<T>>,
+    capacity: usize,
+    dropped: Arc<AtomicU64>,
+}
+
+impl<T> CountingRing<T> {
+    fn new(capacity: usize, dropped: Arc<AtomicU64>) -> Self {
+        Self {
+            ring: Mutex::new(VecDeque::with_capacity(capacity)),
+            capacity,
+            dropped,
+        }
+    }
+
+    /// Push the newest element, evicting (and counting) the oldest when full.
+    fn push(&self, item: T) {
+        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
+        if ring.len() >= self.capacity {
+            ring.pop_front();
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        ring.push_back(item);
+    }
+
+    /// Pop the oldest retained element, if any.
+    fn pop(&self) -> Option<T> {
+        self.ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+}
+
+/// Shared inner state of the drop-oldest ring channel: the counting ring plus a
+/// `flume(1)` "not empty" signal so the receiver can block with a timeout and
+/// observe disconnection (all senders dropped).
+struct CountingRingInner {
+    ring: CountingRing<Sample>,
+    not_empty: flume::Receiver<()>,
+}
+
+/// Keep-latest-N, drop-oldest subscriber handler factory with eviction counting.
+struct CountingRingChannel {
+    capacity: usize,
+    dropped: Arc<AtomicU64>,
+}
+
+/// Receiver half of [`CountingRingChannel`], stored inside the `Subscriber`.
+struct CountingRingHandler {
+    inner: Weak<CountingRingInner>,
+}
+
+impl CountingRingHandler {
+    /// Receive the next sample, waiting up to `timeout`.
+    ///
+    /// `Ok(Some(_))` when a sample is available, `Ok(None)` on timeout, `Err(_)`
+    /// once disconnected (subscriber/callback dropped). The `ZResult<Option<_>>`
+    /// shape matches Zenoh's FIFO/ring handlers so the same receive loop drives
+    /// either handler.
+    fn recv_timeout(&self, timeout: Duration) -> zenoh::Result<Option<Sample>> {
+        let Some(inner) = self.inner.upgrade() else {
+            return Err("ring channel has been closed".into());
+        };
+        loop {
+            if let Some(sample) = inner.ring.pop() {
+                return Ok(Some(sample));
+            }
+            match inner.not_empty.recv_timeout(timeout) {
+                Ok(()) => {}
+                Err(flume::RecvTimeoutError::Timeout) => return Ok(None),
+                Err(flume::RecvTimeoutError::Disconnected) => {
+                    // Drain once more: a sample may have landed between the pull
+                    // above and the senders being dropped.
+                    if let Some(sample) = inner.ring.pop() {
+                        return Ok(Some(sample));
+                    }
+                    return Err("ring channel disconnected".into());
+                }
+            }
+        }
+    }
+}
+
+impl IntoHandler<Sample> for CountingRingChannel {
+    type Handler = CountingRingHandler;
+
+    fn into_handler(self) -> (Callback<Sample>, Self::Handler) {
+        let (sender, receiver) = flume::bounded::<()>(1);
+        let inner = Arc::new(CountingRingInner {
+            ring: CountingRing::new(self.capacity, self.dropped),
+            not_empty: receiver,
+        });
+        let handler = CountingRingHandler {
+            inner: Arc::downgrade(&inner),
+        };
+        // The callback owns the only strong reference to `inner`, so dropping the
+        // subscriber drops the callback, releases `inner` and the `flume` sender,
+        // and makes the handler's `recv_timeout` observe disconnection.
+        let callback = Callback::from(move |sample: Sample| {
+            inner.ring.push(sample);
+            // Wake a blocked receiver; capacity-1, so a full channel already
+            // carries a pending wake-up.
+            let _ = sender.try_send(());
+        });
+        (callback, handler)
+    }
+}
+
+/// A subscriber with either the default FIFO handler or the drop-oldest ring
+/// handler, unified behind a single `recv_timeout` so `create()` is handler-agnostic.
+enum SubscriberHandle {
+    Fifo(Subscriber<FifoChannelHandler<Sample>>),
+    Ring(Subscriber<CountingRingHandler>),
+}
+
+impl SubscriberHandle {
+    fn recv_timeout(&self, timeout: Duration) -> zenoh::Result<Option<Sample>> {
+        match self {
+            SubscriberHandle::Fifo(s) => s.recv_timeout(timeout),
+            SubscriberHandle::Ring(s) => s.recv_timeout(timeout),
+        }
+    }
+}
+
 struct Started {
     // Keeping session field to maintain ownership and prevent session from being dropped
     // while subscriber is still in use. This can be either owned or shared.
     _session: SessionWrapper,
     /// Subscriber wrapped in `Arc` so `create()` can clone it out and release the
     /// `state` lock before the blocking `recv_timeout` poll loop.
-    subscriber:
-        Arc<zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>>,
+    subscriber: Arc<SubscriberHandle>,
     /// Statistics tracking (shared for thread-safe updates)
     stats: Arc<Mutex<Statistics>>,
+    /// Samples dropped by the ring handler (stays 0 for FIFO). Updated from the
+    /// Zenoh callback thread, read by the `dropped` property — hence an atomic.
+    dropped: Arc<AtomicU64>,
 }
 
 /// Wrapper to handle both owned and shared Zenoh sessions.
@@ -126,6 +297,11 @@ struct Settings {
     receive_timeout_ms: u64,
     /// Apply buffer timing metadata (PTS, DTS, duration, flags) from received messages (default: true)
     apply_buffer_meta: bool,
+    /// Subscriber receive-handler strategy (FIFO vs. drop-oldest ring).
+    handler: HandlerMode,
+    /// Ring-handler capacity: max samples retained before the oldest is dropped.
+    /// Ignored for the (unbounded) FIFO handler.
+    queue_depth: u32,
     /// Optional external Zenoh session to share with other elements (Rust API)
     external_session: Option<zenoh::Session>,
     /// Session group name for sharing sessions via property (gst-launch compatible)
@@ -139,6 +315,8 @@ impl Default for Settings {
             config_file: None,
             receive_timeout_ms: 100, // 100ms default for good responsiveness
             apply_buffer_meta: true, // Default to applying buffer timing metadata
+            handler: HandlerMode::Fifo, // Lossless default preserves prior behavior
+            queue_depth: 30,         // ~1s at 30fps; only used by the ring handler
             external_session: None,
             session_group: None,
         }
@@ -251,6 +429,22 @@ impl ObjectImpl for ZenohSrc {
                     .default_value(true)
                     .build(),
 
+                // Receive-handler strategy
+                glib::ParamSpecString::builder("handler")
+                    .nick("Receive Handler")
+                    .blurb("Subscriber receive handler: 'fifo' (lossless, unbounded, default) or 'ring' (keep only the most recent 'queue-depth' samples, dropping the oldest). Use 'ring' for live sources to bound latency build-up.")
+                    .default_value(Some("fifo"))
+                    .build(),
+
+                // Ring-handler depth
+                glib::ParamSpecUInt::builder("queue-depth")
+                    .nick("Queue Depth")
+                    .blurb("Maximum samples retained by the 'ring' handler before the oldest is dropped. Ignored for the 'fifo' handler.")
+                    .default_value(30)
+                    .minimum(1)
+                    .maximum(100_000)
+                    .build(),
+
                 // Session sharing property
                 glib::ParamSpecString::builder("session-group")
                     .nick("Session Group")
@@ -273,6 +467,11 @@ impl ObjectImpl for ZenohSrc {
                     .blurb("Total number of errors encountered")
                     .read_only()
                     .build(),
+                glib::ParamSpecUInt64::builder("dropped")
+                    .nick("Dropped")
+                    .blurb("Total samples dropped by the 'ring' handler since the element started (always 0 for the 'fifo' handler)")
+                    .read_only()
+                    .build(),
             ]
         });
 
@@ -282,7 +481,12 @@ impl ObjectImpl for ZenohSrc {
     fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
         // Check if we're in a state where property changes are allowed
         let state = self.state.lock().unwrap();
-        if state.is_started() && matches!(pspec.name(), "key-expr" | "config" | "session-group") {
+        if state.is_started()
+            && matches!(
+                pspec.name(),
+                "key-expr" | "config" | "session-group" | "handler" | "queue-depth"
+            )
+        {
             gst::warning!(
                 CAT,
                 "Cannot change property '{}' while element is started",
@@ -319,6 +523,21 @@ impl ObjectImpl for ZenohSrc {
             "apply-buffer-meta" => {
                 settings.apply_buffer_meta = value.get::<bool>().expect("type checked upstream");
             }
+            "handler" => {
+                let nick = value.get::<String>().expect("type checked upstream");
+                match HandlerMode::from_nick(&nick) {
+                    Some(mode) => settings.handler = mode,
+                    None => gst::warning!(
+                        CAT,
+                        "Invalid handler '{}' (expected 'fifo' or 'ring'); keeping '{}'",
+                        nick,
+                        settings.handler.as_nick()
+                    ),
+                }
+            }
+            "queue-depth" => {
+                settings.queue_depth = value.get::<u32>().expect("type checked upstream");
+            }
             "session-group" => {
                 settings.session_group = value
                     .get::<Option<String>>()
@@ -333,14 +552,16 @@ impl ObjectImpl for ZenohSrc {
     fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
         match pspec.name() {
             // Configuration properties - read from settings
-            "key-expr" | "config" | "receive-timeout-ms" | "apply-buffer-meta"
-            | "session-group" => {
+            "key-expr" | "config" | "receive-timeout-ms" | "apply-buffer-meta" | "handler"
+            | "queue-depth" | "session-group" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
                     "config" => settings.config_file.to_value(),
                     "receive-timeout-ms" => settings.receive_timeout_ms.to_value(),
                     "apply-buffer-meta" => settings.apply_buffer_meta.to_value(),
+                    "handler" => settings.handler.as_nick().to_value(),
+                    "queue-depth" => settings.queue_depth.to_value(),
                     "session-group" => settings.session_group.to_value(),
                     _ => unreachable!(),
                 }
@@ -366,6 +587,14 @@ impl ObjectImpl for ZenohSrc {
                 let state = self.state.lock().unwrap();
                 if let State::Started(ref started) = *state {
                     started.stats.lock().unwrap().errors.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
+            "dropped" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.dropped.load(Ordering::Relaxed).to_value()
                 } else {
                     0u64.to_value()
                 }
@@ -431,6 +660,8 @@ impl BaseSrcImpl for ZenohSrc {
         let config_file = settings.config_file.clone();
         let external_session = settings.external_session.clone();
         let session_group = settings.session_group.clone();
+        let handler = settings.handler;
+        let queue_depth = settings.queue_depth.max(1) as usize;
         drop(settings);
 
         // Validate the key expression
@@ -492,12 +723,38 @@ impl BaseSrcImpl for ZenohSrc {
         // publisher they're receiving from. This ensures consistent delivery guarantees
         // across the pub-sub connection without requiring manual coordination.
 
-        // Create subscriber
-        let subscriber = session_wrapper
-            .as_session()
-            .declare_subscriber(key_expr)
-            .wait()
-            .map_err(|e| ZenohError::Init(e).to_error_message())?;
+        // Create the subscriber with the configured receive handler. FIFO is the
+        // lossless default; ring keeps only the most recent `queue_depth` samples
+        // (drop-oldest) to bound latency for live sources, counting evictions.
+        let dropped = Arc::new(AtomicU64::new(0));
+        let subscriber = match handler {
+            HandlerMode::Fifo => {
+                gst::debug!(CAT, "Using FIFO receive handler (unbounded)");
+                let sub = session_wrapper
+                    .as_session()
+                    .declare_subscriber(key_expr)
+                    .wait()
+                    .map_err(|e| ZenohError::Init(e).to_error_message())?;
+                SubscriberHandle::Fifo(sub)
+            }
+            HandlerMode::Ring => {
+                gst::debug!(
+                    CAT,
+                    "Using ring receive handler (drop-oldest, depth={})",
+                    queue_depth
+                );
+                let sub = session_wrapper
+                    .as_session()
+                    .declare_subscriber(key_expr)
+                    .with(CountingRingChannel {
+                        capacity: queue_depth,
+                        dropped: dropped.clone(),
+                    })
+                    .wait()
+                    .map_err(|e| ZenohError::Init(e).to_error_message())?;
+                SubscriberHandle::Ring(sub)
+            }
+        };
         let subscriber = Arc::new(subscriber);
 
         // Clear any leftover flush signal from a previous run.
@@ -522,6 +779,7 @@ impl BaseSrcImpl for ZenohSrc {
             _session: session_wrapper,
             subscriber,
             stats: Arc::new(Mutex::new(Statistics::default())),
+            dropped,
         });
 
         gst::debug!(CAT, "ZenohSrc successfully transitioned to Started state");
@@ -981,6 +1239,12 @@ impl URIHandlerImpl for ZenohSrc {
         if !settings.apply_buffer_meta {
             params.push("apply-buffer-meta=false".to_string());
         }
+        if settings.handler != HandlerMode::Fifo {
+            params.push(format!("handler={}", settings.handler.as_nick()));
+        }
+        if settings.queue_depth != 30 {
+            params.push(format!("queue-depth={}", settings.queue_depth));
+        }
 
         if !params.is_empty() {
             uri.push('?');
@@ -1079,6 +1343,26 @@ impl URIHandlerImpl for ZenohSrc {
                                 }
                             };
                         }
+                        "handler" => {
+                            settings.handler = HandlerMode::from_nick(&value).ok_or_else(|| {
+                                glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!(
+                                        "Invalid handler value: {} (expected 'fifo' or 'ring')",
+                                        value
+                                    ),
+                                )
+                            })?;
+                        }
+                        "queue-depth" => {
+                            let depth: u32 = value.parse().map_err(|_| {
+                                glib::Error::new(
+                                    gst::URIError::BadUri,
+                                    &format!("Invalid queue-depth value: {}", value),
+                                )
+                            })?;
+                            settings.queue_depth = depth.clamp(1, 100_000);
+                        }
                         _ => {
                             gst::warning!(CAT, imp = self, "Unknown URI parameter: {}", key);
                         }
@@ -1088,5 +1372,53 @@ impl URIHandlerImpl for ZenohSrc {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handler_mode_nick_roundtrip() {
+        assert_eq!(HandlerMode::from_nick("fifo"), Some(HandlerMode::Fifo));
+        assert_eq!(HandlerMode::from_nick("ring"), Some(HandlerMode::Ring));
+        assert_eq!(HandlerMode::from_nick("bogus"), None);
+        assert_eq!(HandlerMode::Fifo.as_nick(), "fifo");
+        assert_eq!(HandlerMode::Ring.as_nick(), "ring");
+        // Default preserves prior (lossless) behavior.
+        assert_eq!(HandlerMode::default(), HandlerMode::Fifo);
+    }
+
+    #[test]
+    fn counting_ring_drops_oldest_and_counts() {
+        let dropped = Arc::new(AtomicU64::new(0));
+        let ring = CountingRing::new(2, dropped.clone());
+
+        // Push five into a depth-2 ring: the three oldest are evicted and counted.
+        for i in 0..5 {
+            ring.push(i);
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 3);
+
+        // Only the two most recent survive, in arrival order (drop-oldest).
+        assert_eq!(ring.pop(), Some(3));
+        assert_eq!(ring.pop(), Some(4));
+        assert_eq!(ring.pop(), None);
+    }
+
+    #[test]
+    fn counting_ring_under_capacity_never_drops() {
+        let dropped = Arc::new(AtomicU64::new(0));
+        let ring = CountingRing::new(5, dropped.clone());
+
+        ring.push("a");
+        ring.push("b");
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+
+        // FIFO order preserved when within capacity.
+        assert_eq!(ring.pop(), Some("a"));
+        assert_eq!(ring.pop(), Some("b"));
+        assert_eq!(ring.pop(), None);
     }
 }

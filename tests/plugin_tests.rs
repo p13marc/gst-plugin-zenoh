@@ -119,6 +119,39 @@ fn test_zenohsrc_properties() {
 
 #[test]
 #[serial]
+fn test_zenohsrc_handler_properties() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    // Defaults preserve the prior lossless behavior.
+    let handler: String = src.property("handler");
+    assert_eq!(handler, "fifo");
+    let queue_depth: u32 = src.property("queue-depth");
+    assert_eq!(queue_depth, 30);
+    // `dropped` is a read-only stat, zero before the element starts.
+    let dropped: u64 = src.property("dropped");
+    assert_eq!(dropped, 0);
+
+    // Opt into the drop-oldest ring handler with a custom depth.
+    src.set_property("handler", "ring");
+    let handler: String = src.property("handler");
+    assert_eq!(handler, "ring");
+
+    src.set_property("queue-depth", 5u32);
+    let queue_depth: u32 = src.property("queue-depth");
+    assert_eq!(queue_depth, 5);
+
+    // An invalid handler nick is rejected and leaves the value unchanged.
+    src.set_property("handler", "bogus");
+    let handler: String = src.property("handler");
+    assert_eq!(handler, "ring");
+}
+
+#[test]
+#[serial]
 fn test_zenohsink_invalid_properties() {
     init();
 

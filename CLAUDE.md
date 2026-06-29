@@ -69,7 +69,7 @@ src/
   - `change_state(ReadyToNull)`: Tears down all Zenoh resources
   - The `render()` method maps GStreamer buffers and publishes via `publisher.put().wait()`
 
-- **ZenohSrc** (`zenohsrc/imp.rs`): Extends `gst_base::PushSrc`. On `start()`, creates a Zenoh session and subscriber with FIFO handler. The `create()` method uses `subscriber.recv_timeout()` (configurable via `receive-timeout-ms`) to get samples. Supports buffer metadata restoration via `apply-buffer-meta` property.
+- **ZenohSrc** (`zenohsrc/imp.rs`): Extends `gst_base::PushSrc`. On `start()`, creates a Zenoh session and subscriber with either the default FIFO handler or a drop-oldest ring handler (`handler`/`queue-depth`). The `create()` method uses `subscriber.recv_timeout()` (configurable via `receive-timeout-ms`) to get samples. Supports buffer metadata restoration via `apply-buffer-meta` property.
 
 - **ZenohDemux** (`zenohdemux/imp.rs`): Extends `gst::Element`. Creates dynamic source pads based on incoming key expressions. Uses a receiver thread for Zenoh subscription. Supports three pad naming strategies: `full-path`, `last-segment`, and `hash`. Attaches key expression as buffer metadata.
 
@@ -230,12 +230,14 @@ ZenohSink additional (publisher-side QoS — these are NOT on the subscriber ele
 ZenohSrc additional:
 - `receive-timeout-ms` (int): Timeout for receiving samples in ms, 10-5000 (default: 100)
 - `apply-buffer-meta` (bool): Apply buffer timing from Zenoh attachments
+- `handler`: `fifo` (lossless, unbounded, default) or `ring` (keep most-recent `queue-depth`, drop oldest) — use `ring` for live sources to bound latency
+- `queue-depth` (int): Ring-handler capacity, 1-100000 (default: 30); ignored for `fifo`
 
 ZenohDemux additional:
 - `pad-naming`: `full-path`, `last-segment`, or `hash`
 - `apply-buffer-meta` (bool): Apply buffer timing from Zenoh attachments
 
-Statistics (read-only): `bytes-sent`/`bytes-received`, `messages-sent`/`messages-received`, `errors`, `pads-created` (demux only)
+Statistics (read-only): `bytes-sent`/`bytes-received`, `messages-sent`/`messages-received`, `errors`, `dropped` (src ring handler only), `pads-created` (demux only)
 
 ## Dependencies
 

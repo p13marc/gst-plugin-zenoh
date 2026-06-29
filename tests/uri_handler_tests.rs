@@ -84,6 +84,36 @@ fn test_zenohsrc_simple_uri() {
 
 #[test]
 #[serial]
+fn test_zenohsrc_uri_handler_params() {
+    init();
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+
+    let uri_handler = src.dynamic_cast_ref::<gst::URIHandler>().unwrap();
+
+    // Parse the ring-handler params out of a URI.
+    uri_handler
+        .set_uri("zenoh:demo/video?handler=ring&queue-depth=5")
+        .unwrap();
+    let handler: String = src.property("handler");
+    assert_eq!(handler, "ring");
+    let queue_depth: u32 = src.property("queue-depth");
+    assert_eq!(queue_depth, 5);
+
+    // Non-default params round-trip back into the emitted URI.
+    let uri = uri_handler.uri().unwrap();
+    assert!(uri.contains("handler=ring"), "uri was: {uri}");
+    assert!(uri.contains("queue-depth=5"), "uri was: {uri}");
+
+    // An invalid handler nick in the URI is a BadUri error.
+    let err = uri_handler.set_uri("zenoh:demo/video?handler=bogus");
+    assert!(err.is_err(), "invalid handler should be rejected");
+}
+
+#[test]
+#[serial]
 fn test_uri_with_parameters() {
     init();
 
