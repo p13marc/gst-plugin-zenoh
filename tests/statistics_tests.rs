@@ -140,19 +140,28 @@ fn test_statistics_integration() {
     receiver_pipeline.set_state(gst::State::Playing).unwrap();
     sender_pipeline.set_state(gst::State::Playing).unwrap();
 
-    // Wait for data to flow.
-    std::thread::sleep(std::time::Duration::from_millis(800));
+    // Poll the stats (robust under parallel test load) — they must be readable
+    // *during* active traffic (Epic #2 acceptance), proving the state lock is not
+    // held across the publish/receive I/O.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut messages_sent: u64 = 0;
+    let mut messages_received: u64 = 0;
+    while std::time::Instant::now() < deadline {
+        messages_sent = zenohsink.property("messages-sent");
+        messages_received = zenohsrc.property("messages-received");
+        if messages_sent > 0 && messages_received > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 
-    // Statistics must be readable *during* active traffic (Epic #2 acceptance).
     let bytes_sent: u64 = zenohsink.property("bytes-sent");
-    let messages_sent: u64 = zenohsink.property("messages-sent");
+    let bytes_received: u64 = zenohsrc.property("bytes-received");
     println!("Sender - Bytes sent: {bytes_sent}, Messages sent: {messages_sent}");
+    println!("Receiver - Bytes received: {bytes_received}, Messages received: {messages_received}");
+
     assert!(messages_sent > 0, "Should have sent at least one message");
     assert!(bytes_sent > 0, "Should have sent some bytes");
-
-    let bytes_received: u64 = zenohsrc.property("bytes-received");
-    let messages_received: u64 = zenohsrc.property("messages-received");
-    println!("Receiver - Bytes received: {bytes_received}, Messages received: {messages_received}");
     assert!(
         messages_received > 0,
         "Should have received at least one message"

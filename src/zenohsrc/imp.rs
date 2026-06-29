@@ -54,8 +54,15 @@ struct Started {
 enum SessionWrapper {
     /// Element created this session (will be dropped when element stops)
     Owned(zenoh::Session),
-    /// Element is using a shared session (may outlive this element)
+    /// Element is using an externally-provided shared session (Rust API); the
+    /// caller owns its lifetime, so this element does not release it.
     Shared(zenoh::Session),
+    /// Element is using a session from the named group registry; dropping this
+    /// releases one reference (closing the session on the last release).
+    SharedGroup {
+        session: zenoh::Session,
+        group: String,
+    },
 }
 
 impl SessionWrapper {
@@ -64,6 +71,15 @@ impl SessionWrapper {
         match self {
             SessionWrapper::Owned(session) => session,
             SessionWrapper::Shared(session) => session,
+            SessionWrapper::SharedGroup { session, .. } => session,
+        }
+    }
+}
+
+impl Drop for SessionWrapper {
+    fn drop(&mut self) {
+        if let SessionWrapper::SharedGroup { group, .. } = self {
+            crate::session::release_session(group);
         }
     }
 }
@@ -521,7 +537,10 @@ impl BaseSrcImpl for ZenohSrc {
             gst::debug!(CAT, "Using session group '{}'", group);
             let session = crate::session::get_or_create_session(group, config_file.as_deref())
                 .map_err(|e| ZenohError::Init(e).to_error_message())?;
-            SessionWrapper::Shared(session)
+            SessionWrapper::SharedGroup {
+                session,
+                group: group.clone(),
+            }
         } else {
             // Priority 3: Create a new owned session
             gst::debug!(CAT, "Creating new Zenoh session");
@@ -758,21 +777,21 @@ impl PushSrcImpl for ZenohSrc {
                     continue;
                 }
                 Err(e) => {
-                    // Check if it's a timeout or disconnection
-                    let err_msg = format!("{:?}", e);
-                    if err_msg.contains("Timeout") {
-                        // Timeout - check flushing flag and retry
-                        continue;
-                    } else {
-                        // Disconnected or other error
-                        stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
-                        gst::element_imp_error!(
-                            self,
-                            gst::ResourceError::Read,
-                            ["Subscriber error: {}", e]
-                        );
-                        return Err(gst::FlowError::Error);
+                    // `recv_timeout` maps an expired timeout to `Ok(None)` (handled
+                    // above), so an `Err` here is a genuine disconnect — the channel's
+                    // senders were dropped (subscriber undeclared / session closed).
+                    // Never classify by formatting the error string.
+                    if self.flushing.load(Ordering::SeqCst) {
+                        gst::debug!(CAT, imp = self, "Subscriber closed while flushing");
+                        return Err(gst::FlowError::Flushing);
                     }
+                    stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                    gst::element_imp_error!(
+                        self,
+                        gst::ResourceError::Read,
+                        ["Subscriber disconnected: {}", e]
+                    );
+                    return Err(gst::FlowError::Error);
                 }
             }
         };

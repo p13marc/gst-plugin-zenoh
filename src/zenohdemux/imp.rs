@@ -649,14 +649,12 @@ impl ZenohDemux {
                     continue;
                 }
                 Err(e) => {
-                    let err_msg = format!("{:?}", e);
-                    if err_msg.contains("Timeout") {
-                        continue;
-                    } else {
-                        gst::warning!(CAT, "Subscriber error: {}", e);
-                        stats.lock().unwrap().errors += 1;
-                        break;
-                    }
+                    // `recv_timeout` maps an expired timeout to `Ok(None)` (handled
+                    // above), so an `Err` here is a genuine disconnect. Never classify
+                    // by formatting the error string.
+                    gst::warning!(CAT, "Subscriber disconnected: {}", e);
+                    stats.lock().unwrap().errors += 1;
+                    break;
                 }
             }
         }

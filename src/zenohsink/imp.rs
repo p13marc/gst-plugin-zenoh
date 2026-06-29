@@ -120,8 +120,15 @@ struct Started {
 enum SessionWrapper {
     /// Element created this session (will be dropped when element stops)
     Owned(zenoh::Session),
-    /// Element is using a shared session (may outlive this element)
+    /// Element is using an externally-provided shared session (Rust API); the
+    /// caller owns its lifetime, so this element does not release it.
     Shared(zenoh::Session),
+    /// Element is using a session from the named group registry; dropping this
+    /// releases one reference (closing the session on the last release).
+    SharedGroup {
+        session: zenoh::Session,
+        group: String,
+    },
 }
 
 impl SessionWrapper {
@@ -130,6 +137,15 @@ impl SessionWrapper {
         match self {
             SessionWrapper::Owned(session) => session,
             SessionWrapper::Shared(session) => session,
+            SessionWrapper::SharedGroup { session, .. } => session,
+        }
+    }
+}
+
+impl Drop for SessionWrapper {
+    fn drop(&mut self) {
+        if let SessionWrapper::SharedGroup { group, .. } = self {
+            crate::session::release_session(group);
         }
     }
 }
@@ -332,7 +348,10 @@ impl ZenohSink {
             gst::debug!(CAT, "Using session group '{}'", group);
             let session = crate::session::get_or_create_session(group, config_file.as_deref())
                 .map_err(|e| ZenohError::Init(e).to_error_message())?;
-            SessionWrapper::Shared(session)
+            SessionWrapper::SharedGroup {
+                session,
+                group: group.clone(),
+            }
         } else {
             gst::debug!(CAT, "Creating new Zenoh session");
             let config = match config_file {
@@ -1394,25 +1413,11 @@ impl BaseSinkImpl for ZenohSink {
                     .key_expr
                     .clone();
 
-                // Check if this is a network-related error before consuming e
-                let error_msg = format!("{}", e);
                 let err = ZenohError::Publish {
                     key_expr,
                     source: e,
                 };
-
-                if error_msg.contains("timeout")
-                    || error_msg.contains("connection")
-                    || error_msg.contains("network")
-                {
-                    gst::element_imp_error!(
-                        self,
-                        gst::ResourceError::Write,
-                        ["Network error while publishing: {}", err]
-                    );
-                } else {
-                    gst::element_imp_error!(self, gst::ResourceError::Write, ["{}", err]);
-                }
+                gst::element_imp_error!(self, gst::ResourceError::Write, ["{}", err]);
                 Err(err.to_flow_error())
             }
             PublishOutcome::Flushing => {
