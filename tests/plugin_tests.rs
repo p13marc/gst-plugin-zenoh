@@ -152,6 +152,25 @@ fn test_zenohsrc_handler_properties() {
 
 #[test]
 #[serial]
+fn test_connected_property_default_false() {
+    init();
+
+    // Before starting, neither element has an open transport.
+    let sink = gst::ElementFactory::make("zenohsink")
+        .build()
+        .expect("Failed to create zenohsink");
+    let connected: bool = sink.property("connected");
+    assert!(!connected, "sink 'connected' should default to false");
+
+    let src = gst::ElementFactory::make("zenohsrc")
+        .build()
+        .expect("Failed to create zenohsrc");
+    let connected: bool = src.property("connected");
+    assert!(!connected, "src 'connected' should default to false");
+}
+
+#[test]
+#[serial]
 fn test_zenohsink_invalid_properties() {
     init();
 

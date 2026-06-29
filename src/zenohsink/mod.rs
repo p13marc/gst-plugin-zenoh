@@ -341,6 +341,15 @@ impl ZenohSink {
         self.property("has-subscribers")
     }
 
+    /// Returns whether the Zenoh session currently has any open transport.
+    ///
+    /// Reflects transport up/down as observed by Zenoh (which reconnects on its
+    /// own); see the `zenoh-connectivity-changed` bus message for transitions.
+    /// Returns `false` when the element is not at least in READY.
+    pub fn connected(&self) -> bool {
+        self.property("connected")
+    }
+
     /// Connects to the `matching-changed` signal.
     ///
     /// The callback receives `true` when at least one matching subscriber

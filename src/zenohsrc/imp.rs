@@ -200,6 +200,10 @@ impl SubscriberHandle {
 }
 
 struct Started {
+    /// Connectivity listener handle. Declared before `_session` so it undeclares
+    /// while the session is still alive; keeping the handle — rather than a
+    /// `.background()` listener — prevents a per-cycle leak on shared sessions.
+    _connectivity_listener: Option<crate::connectivity::ConnectivityListener>,
     // Keeping session field to maintain ownership and prevent session from being dropped
     // while subscriber is still in use. This can be either owned or shared.
     _session: SessionWrapper,
@@ -211,6 +215,9 @@ struct Started {
     /// Samples dropped by the ring handler (stays 0 for FIFO). Updated from the
     /// Zenoh callback thread, read by the `dropped` property — hence an atomic.
     dropped: Arc<AtomicU64>,
+    /// Whether the Zenoh session currently has any open transport.
+    /// Updated via Zenoh's background transport-events listener callback.
+    connected: Arc<AtomicBool>,
 }
 
 /// Wrapper to handle both owned and shared Zenoh sessions.
@@ -472,6 +479,12 @@ impl ObjectImpl for ZenohSrc {
                     .blurb("Total samples dropped by the 'ring' handler since the element started (always 0 for the 'fifo' handler)")
                     .read_only()
                     .build(),
+                glib::ParamSpecBoolean::builder("connected")
+                    .nick("Connected")
+                    .blurb("Whether the Zenoh session currently has any open transport. Zenoh reconnects on its own; this reports transport up/down (see the 'zenoh-connectivity-changed' bus message).")
+                    .default_value(false)
+                    .read_only()
+                    .build(),
             ]
         });
 
@@ -597,6 +610,14 @@ impl ObjectImpl for ZenohSrc {
                     started.dropped.load(Ordering::Relaxed).to_value()
                 } else {
                     0u64.to_value()
+                }
+            }
+            "connected" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.connected.load(Ordering::Relaxed).to_value()
+                } else {
+                    false.to_value()
                 }
             }
             name => {
@@ -757,6 +778,24 @@ impl BaseSrcImpl for ZenohSrc {
         };
         let subscriber = Arc::new(subscriber);
 
+        // Observe session connectivity (transport up/down) via Zenoh's
+        // transport-events listener. Zenoh reconnects on its own; this only reports.
+        // The handle is kept (not `.background()`) and dropped on teardown so it
+        // does not leak per start/stop cycle on a shared session.
+        let connected = Arc::new(AtomicBool::new(false));
+        let connectivity_listener = match crate::connectivity::spawn_listener(
+            session_wrapper.as_session(),
+            self.obj().upcast_ref::<gst::Element>(),
+            connected.clone(),
+        ) {
+            Ok(listener) => Some(listener),
+            Err(e) => {
+                // Non-fatal: connectivity reporting is best-effort, data still flows.
+                gst::warning!(CAT, "Failed to start connectivity listener: {}", e);
+                None
+            }
+        };
+
         // Clear any leftover flush signal from a previous run.
         self.flushing.store(false, Ordering::SeqCst);
 
@@ -776,10 +815,12 @@ impl BaseSrcImpl for ZenohSrc {
         }
 
         *state = State::Started(Started {
+            _connectivity_listener: connectivity_listener,
             _session: session_wrapper,
             subscriber,
             stats: Arc::new(Mutex::new(Statistics::default())),
             dropped,
+            connected,
         });
 
         gst::debug!(CAT, "ZenohSrc successfully transitioned to Started state");
