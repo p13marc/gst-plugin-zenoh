@@ -107,3 +107,67 @@ fn test_src_reports_connected_over_open_transport() {
         "expected a 'zenoh-connectivity-changed' bus message with connected=true"
     );
 }
+
+/// Regression guard for the connectivity-listener lifecycle on a SHARED session.
+///
+/// The listener must be undeclared on each stop (it is a kept handle, not a
+/// `.background()` listener, which would leak one listener per cycle on a session
+/// that outlives the element). This exercises the on-demand pattern
+/// (PLAYING↔READY) over a shared session many times and asserts `connected` is
+/// correctly re-established on every cycle — i.e. the per-cycle declare/undeclare
+/// keeps working and never breaks the on-demand flow.
+#[test]
+#[serial]
+fn test_connectivity_listener_cycles_on_shared_session() {
+    init();
+
+    let endpoint = "tcp/127.0.0.1:17452";
+    let _listener = open_listener(endpoint);
+    let client = open_connector(endpoint);
+    std::thread::sleep(Duration::from_millis(800));
+
+    let key_expr = unique_key_expr("connectivity-cycles");
+    let pipeline = gst::Pipeline::new();
+    let zenohsrc = gstzenoh::ZenohSrc::builder(&key_expr)
+        .session(client.clone())
+        .receive_timeout_ms(50)
+        .build();
+    let fakesink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .unwrap();
+    let src_elem: gst::Element = zenohsrc.clone().upcast();
+    pipeline.add_many([&src_elem, &fakesink]).unwrap();
+    src_elem.link(&fakesink).unwrap();
+
+    // Run several PLAYING<->READY cycles. Each PLAYING re-declares a listener
+    // (and each READY drops the previous one); connectivity must report true
+    // every time over the shared, already-connected session.
+    for cycle in 0..5 {
+        pipeline.set_state(gst::State::Playing).unwrap();
+
+        let mut connected = false;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if zenohsrc.connected() {
+                connected = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            connected,
+            "cycle {cycle}: 'connected' should be true over the shared open transport"
+        );
+
+        pipeline.set_state(gst::State::Ready).unwrap();
+    }
+
+    let _ = pipeline.set_state(gst::State::Null);
+    // The shared session is still usable after all the element's listeners were
+    // declared and undeclared — declare a fresh subscriber to prove it.
+    let _sub = client
+        .declare_subscriber(unique_key_expr("post-cycle"))
+        .wait()
+        .expect("shared session should remain healthy after listener churn");
+}

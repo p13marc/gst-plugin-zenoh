@@ -11,10 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Connectivity observability** on `zenohsink` and `zenohsrc` (#14). New
   read-only `connected` property and a `zenoh-connectivity-changed` bus message
   (boolean `connected` field) report whether the Zenoh session has any open
-  transport, driven by Zenoh's background transport-events listener. Zenoh
-  re-establishes transports on its own, so this **observes** connectivity rather
-  than implementing reconnection. Also fixes the resilience overclaim in the
-  crate docs (`lib.rs`).
+  transport, driven by Zenoh's transport-events listener. The listener handle is
+  kept and undeclared on teardown (not a `.background()` listener, which would
+  leak one per start/stop cycle on a shared session). Zenoh re-establishes
+  transports on its own, so this **observes** connectivity rather than
+  implementing reconnection. Also fixes the resilience overclaim in the crate
+  docs (`lib.rs`).
 - **`zenohsrc` ring / drop-oldest receive handler** for live sources (#13). New
   `handler` property (`fifo` default, lossless/unbounded — or `ring`, keep the
   most-recent `queue-depth` samples and drop the oldest) plus `queue-depth`

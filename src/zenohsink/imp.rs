@@ -85,6 +85,11 @@ struct ReadyState {
     /// hang behind an in-flight block-mode publish); the worker exits on its own
     /// once `publish_tx` is dropped and any in-flight `put()` returns.
     _worker: Option<JoinHandle<()>>,
+    /// Connectivity listener handle. Declared before `_session` so it undeclares
+    /// while the session is still alive (avoids a no-op undeclare + error log for
+    /// owned sessions); keeping the handle — rather than a `.background()`
+    /// listener — is what prevents a per-cycle leak on shared sessions.
+    _connectivity_listener: Option<crate::connectivity::ConnectivityListener>,
     // Keeping session field to maintain ownership and prevent session from being
     // dropped while the worker's publisher is still in use. Owned or shared.
     _session: SessionWrapper,
@@ -501,17 +506,23 @@ impl ZenohSink {
             );
         }
 
-        // Observe session connectivity (transport up/down) via Zenoh's background
+        // Observe session connectivity (transport up/down) via Zenoh's
         // transport-events listener. Zenoh reconnects on its own; this only reports.
+        // The handle is kept (not `.background()`) and dropped on teardown so it
+        // does not leak per start/stop cycle on a shared session.
         let connected = Arc::new(AtomicBool::new(false));
-        if let Err(e) = crate::connectivity::spawn_listener(
+        let connectivity_listener = match crate::connectivity::spawn_listener(
             session_wrapper.as_session(),
             self.obj().upcast_ref::<gst::Element>(),
             connected.clone(),
         ) {
-            // Non-fatal: connectivity reporting is best-effort, data still flows.
-            gst::warning!(CAT, "Failed to start connectivity listener: {}", e);
-        }
+            Ok(listener) => Some(listener),
+            Err(e) => {
+                // Non-fatal: connectivity reporting is best-effort, data still flows.
+                gst::warning!(CAT, "Failed to start connectivity listener: {}", e);
+                None
+            }
+        };
 
         // Spawn the publish worker that owns the publisher. Performing publishes on a
         // dedicated thread keeps the blocking `put().wait()` off the streaming thread,
@@ -547,6 +558,7 @@ impl ZenohSink {
         Ok(ReadyState {
             publish_tx,
             _worker: Some(worker),
+            _connectivity_listener: connectivity_listener,
             _session: session_wrapper,
             has_subscribers,
             connected,

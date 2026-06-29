@@ -16,24 +16,35 @@ use std::sync::{Arc, Mutex};
 use gst::prelude::*;
 use zenoh::Wait;
 use zenoh::sample::SampleKind;
+use zenoh::session::TransportEventsListener;
 
 /// Name of the element bus message posted on connectivity transitions. Carries a
 /// boolean `connected` field.
 pub(crate) const CONNECTIVITY_MESSAGE: &str = "zenoh-connectivity-changed";
 
-/// Spawn a background transport-events listener on `session`.
+/// Handle to a running connectivity listener. Dropping it undeclares the
+/// listener from the session.
+///
+/// This is deliberately **not** a `.background()` listener: a background listener
+/// lives until the *session* closes, which leaks one listener per element
+/// start/stop cycle when the session is **shared** (session-group / external) and
+/// outlives the element — e.g. on-demand pipelines that cycle READY↔PLAYING. By
+/// keeping the handle in element state, the listener is undeclared on teardown.
+pub(crate) type ConnectivityListener = TransportEventsListener<()>;
+
+/// Declare a transport-events listener on `session` and return its handle.
 ///
 /// `connected` is kept in sync with "any transport currently open"; on each
 /// transition the `connected` property is notified and a [`CONNECTIVITY_MESSAGE`]
-/// element message is posted on `element`'s bus. The listener runs in the
-/// background and lives for the session's lifetime, so it stops when the session
-/// is dropped. `history(true)` replays the transports already open when the
-/// listener is declared, so the initial `connected` value is correct.
+/// element message is posted on `element`'s bus. `history(true)` replays the
+/// transports already open when the listener is declared, so the initial
+/// `connected` value is correct. The returned handle must be kept alive for the
+/// listener to keep running, and dropped on teardown to undeclare it.
 pub(crate) fn spawn_listener(
     session: &zenoh::Session,
     element: &gst::Element,
     connected: Arc<AtomicBool>,
-) -> zenoh::Result<()> {
+) -> zenoh::Result<ConnectivityListener> {
     let element_weak = element.downgrade();
     // Exact count of open transports; `connected` is derived as `count > 0`. The
     // count update and the `connected` swap happen under one lock so transitions
@@ -73,8 +84,10 @@ pub(crate) fn spawn_listener(
                 let _ = bus.post(gst::message::Element::builder(s).src(&element).build());
             }
         })
-        .background()
-        .wait()?;
-
-    Ok(())
+        // NOTE: deliberately keep the handle (no `.background()`): a background
+        // listener can only be undeclared by closing the session, which leaks one
+        // per start/stop cycle on a shared session. The returned handle undeclares
+        // on drop. The callback touches only `Arc`s and a `WeakRef`, so a callback
+        // still in flight on a Zenoh thread after undeclare is harmless.
+        .wait()
 }
