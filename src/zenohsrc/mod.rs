@@ -299,6 +299,14 @@ impl ZenohSrc {
     pub fn dropped(&self) -> u64 {
         self.property("dropped")
     }
+
+    /// Returns whether the Zenoh session currently has any open transport.
+    ///
+    /// Reflects transport up/down as observed by Zenoh (which reconnects on its
+    /// own); see the `zenoh-connectivity-changed` bus message for transitions.
+    pub fn connected(&self) -> bool {
+        self.property("connected")
+    }
 }
 
 impl TryFrom<gst::Element> for ZenohSrc {

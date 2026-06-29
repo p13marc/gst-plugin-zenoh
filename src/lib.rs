@@ -18,7 +18,10 @@
 //! - **Express Mode**: Ultra-low latency streaming with queue bypass
 //! - **Session Sharing**: Efficient resource management across multiple elements
 //! - **Thread Safety**: Safe concurrent access to all components
-//! - **Error Recovery**: Comprehensive error handling and network resilience
+//! - **Connectivity Observability**: A read-only `connected` property and
+//!   `zenoh-connectivity-changed` bus message report transport up/down transitions
+//!   (Zenoh re-establishes transports itself; the plugin observes, it does not
+//!   drive reconnection)
 //! - **Optional Compression**: zstd, lz4, and gzip support via feature flags
 //!
 //! ## Quick Start (gst-launch)
@@ -182,6 +185,7 @@
 
 use gst::glib;
 
+pub(crate) mod connectivity;
 mod error;
 pub mod metadata;
 pub(crate) mod session;

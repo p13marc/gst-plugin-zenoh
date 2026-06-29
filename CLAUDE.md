@@ -81,6 +81,8 @@ src/
 
 - **Subscriber Matching** (`zenohsink`): Uses Zenoh's background matching listener to detect subscriber presence. Exposes `has-subscribers` read-only property, `matching-changed` GLib signal, and `zenoh-matching-changed` bus message. Works from READY state.
 
+- **Connectivity Observability** (`zenohsink` + `zenohsrc`): Shared `connectivity.rs` spawns a background Zenoh transport-events listener that tracks whether the session has any open transport. Exposes a `connected` read-only property and a `zenoh-connectivity-changed` bus message on transitions. Zenoh re-establishes transports itself; this only *reports* connectivity, it does not drive reconnection.
+
 - **Caps Transmission**: First buffer sends GStreamer caps as Zenoh attachment metadata (controlled by `send-caps` property).
 
 - **Buffer Metadata**: PTS, DTS, duration, offset, and flags can be transmitted via Zenoh attachments (`send-buffer-meta` on sink, `apply-buffer-meta` on src/demux). Uses `metadata.rs` with versioned format (v1.0).
@@ -172,6 +174,7 @@ cargo test --test metadata_tests        # Buffer metadata preservation (PTS, DTS
 cargo test --test compression_tests     # Compression round-trip (requires compression feature)
 cargo test --test demux_flow_tests      # Demux pad creation and data routing
 cargo test --test matching_tests        # Subscriber matching status (has-subscribers, signal, bus message)
+cargo test --test connectivity_tests    # Connectivity observability (connected property, bus message)
 cargo test --test on_demand_tests      # On-demand pipeline lifecycle (READY→PLAYING→READY)
 ```
 
@@ -226,12 +229,16 @@ ZenohSink additional (publisher-side QoS — these are NOT on the subscriber ele
 - `has-subscribers` (bool, read-only): Whether matching Zenoh subscribers currently exist
 - Signal `matching-changed(bool)`: Emitted when subscriber presence changes
 - Bus message `zenoh-matching-changed`: Posted with `has-subscribers` field on matching changes
+- `connected` (bool, read-only): Whether the Zenoh session has any open transport (Zenoh reconnects itself; this reports)
+- Bus message `zenoh-connectivity-changed`: Posted with `connected` field on transport up/down
 
 ZenohSrc additional:
 - `receive-timeout-ms` (int): Timeout for receiving samples in ms, 10-5000 (default: 100)
 - `apply-buffer-meta` (bool): Apply buffer timing from Zenoh attachments
 - `handler`: `fifo` (lossless, unbounded, default) or `ring` (keep most-recent `queue-depth`, drop oldest) — use `ring` for live sources to bound latency
 - `queue-depth` (int): Ring-handler capacity, 1-100000 (default: 30); ignored for `fifo`
+- `connected` (bool, read-only): Whether the Zenoh session has any open transport (Zenoh reconnects itself; this reports)
+- Bus message `zenoh-connectivity-changed`: Posted with `connected` field on transport up/down
 
 ZenohDemux additional:
 - `pad-naming`: `full-path`, `last-segment`, or `hash`

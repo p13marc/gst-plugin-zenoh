@@ -91,6 +91,9 @@ struct ReadyState {
     /// Whether there are currently matching Zenoh subscribers.
     /// Updated via Zenoh's background matching listener callback.
     has_subscribers: Arc<AtomicBool>,
+    /// Whether the Zenoh session currently has any open transport.
+    /// Updated via Zenoh's background transport-events listener callback.
+    connected: Arc<AtomicBool>,
 }
 
 /// Additional resources created during READY→PAUSED (start()) for data rendering.
@@ -187,6 +190,15 @@ impl State {
         match self {
             State::Ready(ready) => Some(&ready.has_subscribers),
             State::Started(started) => Some(&started.ready.has_subscribers),
+            _ => None,
+        }
+    }
+
+    /// Returns the connectivity atomic, if available (Ready or Started).
+    fn connected(&self) -> Option<&Arc<AtomicBool>> {
+        match self {
+            State::Ready(ready) => Some(&ready.connected),
+            State::Started(started) => Some(&started.ready.connected),
             _ => None,
         }
     }
@@ -489,6 +501,18 @@ impl ZenohSink {
             );
         }
 
+        // Observe session connectivity (transport up/down) via Zenoh's background
+        // transport-events listener. Zenoh reconnects on its own; this only reports.
+        let connected = Arc::new(AtomicBool::new(false));
+        if let Err(e) = crate::connectivity::spawn_listener(
+            session_wrapper.as_session(),
+            self.obj().upcast_ref::<gst::Element>(),
+            connected.clone(),
+        ) {
+            // Non-fatal: connectivity reporting is best-effort, data still flows.
+            gst::warning!(CAT, "Failed to start connectivity listener: {}", e);
+        }
+
         // Spawn the publish worker that owns the publisher. Performing publishes on a
         // dedicated thread keeps the blocking `put().wait()` off the streaming thread,
         // so `render()` never holds the `state` lock across network I/O.
@@ -525,6 +549,7 @@ impl ZenohSink {
             _worker: Some(worker),
             _session: session_wrapper,
             has_subscribers,
+            connected,
         })
     }
 
@@ -953,6 +978,13 @@ impl ObjectImpl for ZenohSink {
                     .default_value(false)
                     .read_only()
                     .build(),
+                // Connectivity property (read-only)
+                glib::ParamSpecBoolean::builder("connected")
+                    .nick("Connected")
+                    .blurb("Whether the Zenoh session currently has any open transport. Zenoh reconnects on its own; this reports transport up/down (see the 'zenoh-connectivity-changed' bus message).")
+                    .default_value(false)
+                    .read_only()
+                    .build(),
                 // Statistics properties (read-only)
                 glib::ParamSpecUInt64::builder("bytes-sent")
                     .nick("Bytes Sent")
@@ -1182,6 +1214,15 @@ impl ObjectImpl for ZenohSink {
                 let state = self.state.lock().unwrap();
                 if let Some(has_subscribers) = state.has_subscribers() {
                     has_subscribers.load(Ordering::Relaxed).to_value()
+                } else {
+                    false.to_value()
+                }
+            }
+            // Connectivity - available in Ready or Started state
+            "connected" => {
+                let state = self.state.lock().unwrap();
+                if let Some(connected) = state.connected() {
+                    connected.load(Ordering::Relaxed).to_value()
                 } else {
                     false.to_value()
                 }
