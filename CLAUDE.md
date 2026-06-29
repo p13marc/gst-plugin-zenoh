@@ -29,9 +29,11 @@ cargo test --test plugin_tests
 cargo test --test integration_tests
 
 # Run examples (must set plugin path)
-GST_PLUGIN_PATH=target/debug cargo run --example basic
-GST_PLUGIN_PATH=target/debug cargo run --example configuration
-GST_PLUGIN_PATH=target/debug cargo run --example on_demand
+GST_PLUGIN_PATH=target/debug cargo run --example basic          # Minimal sink/src pipeline
+GST_PLUGIN_PATH=target/debug cargo run --example configuration  # Configuring element properties
+GST_PLUGIN_PATH=target/debug cargo run --example on_demand      # Matching-driven on-demand pipeline
+GST_PLUGIN_PATH=target/debug cargo run --example simple_data    # Raw data round-trip via session sharing
+GST_PLUGIN_PATH=target/debug cargo run --example video_stream   # End-to-end video with live stats
 
 # Code quality
 cargo fmt --check
@@ -159,7 +161,7 @@ let sink2 = ZenohSink::builder("demo/audio")
 Tests use `serial_test` for isolation since GStreamer plugin registration is global:
 
 ```bash
-cargo test                              # All tests (~148 tests)
+cargo test                              # All tests (~171; 190 with --features compression)
 cargo test --test plugin_tests          # Element creation, properties
 cargo test --test integration_tests     # Pipeline integration
 cargo test --test uri_handler_tests     # URI parsing, buffer metadata properties

@@ -1,0 +1,48 @@
+# Configuration for cargo-deny (https://embarkstudios.github.io/cargo-deny/).
+# Run locally with: cargo deny check
+
+[graph]
+all-features = true
+
+[advisories]
+# Use the default advisory database; fail the build on any unmaintained or
+# vulnerable dependency. `ignore` can hold specific RUSTSEC ids when a fix is
+# pending and the risk has been reviewed.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# This crate is MPL-2.0; accept dependencies under well-known permissive or
+# weak-copyleft licenses compatible with redistribution. EPL-2.0 is required:
+# Eclipse Zenoh (the whole point of this plugin) and its crates are EPL-2.0.
+allow = [
+    "MPL-2.0",
+    "EPL-2.0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+# r-efi is LGPL-2.1, but it is a UEFI-only transitive dependency that is never
+# compiled or linked on the Linux targets this plugin ships for.
+exceptions = [
+    { name = "r-efi", allow = ["LGPL-2.1-or-later"] },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
