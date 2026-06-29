@@ -18,6 +18,10 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new("zenohsrc", gst::DebugColorFlags::empty(), Some("Zenoh Src"))
 });
 
+/// Default timeout bounding `zenoh::open(...).wait()` during start so an unreachable
+/// router can't stall the state-change thread forever.
+const SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Statistics tracking for ZenohSrc
 #[derive(Debug, Clone, Default)]
 struct Statistics {
@@ -30,10 +34,10 @@ struct Started {
     // Keeping session field to maintain ownership and prevent session from being dropped
     // while subscriber is still in use. This can be either owned or shared.
     _session: SessionWrapper,
+    /// Subscriber wrapped in `Arc` so `create()` can clone it out and release the
+    /// `state` lock before the blocking `recv_timeout` poll loop.
     subscriber:
-        zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
-    /// Flag to signal that the element is flushing and should cancel blocking operations
-    flushing: Arc<AtomicBool>,
+        Arc<zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>>,
     /// Statistics tracking (shared for thread-safe updates)
     stats: Arc<Mutex<Statistics>>,
 }
@@ -50,8 +54,15 @@ struct Started {
 enum SessionWrapper {
     /// Element created this session (will be dropped when element stops)
     Owned(zenoh::Session),
-    /// Element is using a shared session (may outlive this element)
+    /// Element is using an externally-provided shared session (Rust API); the
+    /// caller owns its lifetime, so this element does not release it.
     Shared(zenoh::Session),
+    /// Element is using a session from the named group registry; dropping this
+    /// releases one reference (closing the session on the last release).
+    SharedGroup {
+        session: zenoh::Session,
+        group: String,
+    },
 }
 
 impl SessionWrapper {
@@ -60,6 +71,15 @@ impl SessionWrapper {
         match self {
             SessionWrapper::Owned(session) => session,
             SessionWrapper::Shared(session) => session,
+            SessionWrapper::SharedGroup { session, .. } => session,
+        }
+    }
+}
+
+impl Drop for SessionWrapper {
+    fn drop(&mut self) {
+        if let SessionWrapper::SharedGroup { group, .. } = self {
+            crate::session::release_session(group);
         }
     }
 }
@@ -152,6 +172,11 @@ pub struct ZenohSrc {
     settings: Mutex<Settings>,
     /// Current operational state
     state: Mutex<State>,
+    /// Flag to signal that the element is flushing and should cancel blocking
+    /// operations. Stored on `self` (not behind `state`) so `unlock()`, `unlock_stop()`
+    /// and the flush `event()` handlers can set it lock-free without queueing behind
+    /// a `create()` that holds the `state` lock across its poll loop.
+    flushing: Arc<AtomicBool>,
 }
 
 impl ZenohSrc {
@@ -512,7 +537,10 @@ impl BaseSrcImpl for ZenohSrc {
             gst::debug!(CAT, "Using session group '{}'", group);
             let session = crate::session::get_or_create_session(group, config_file.as_deref())
                 .map_err(|e| ZenohError::Init(e).to_error_message())?;
-            SessionWrapper::Shared(session)
+            SessionWrapper::SharedGroup {
+                session,
+                group: group.clone(),
+            }
         } else {
             // Priority 3: Create a new owned session
             gst::debug!(CAT, "Creating new Zenoh session");
@@ -524,9 +552,20 @@ impl BaseSrcImpl for ZenohSrc {
                 }
                 _ => zenoh::Config::default(),
             };
-            let session = zenoh::open(config)
-                .wait()
-                .map_err(|e| ZenohError::Init(e).to_error_message())?;
+            // Bound the open so an unreachable router can't stall the state change.
+            let session = crate::utils::call_with_timeout(SESSION_OPEN_TIMEOUT, move || {
+                zenoh::open(config).wait()
+            })
+            .map_err(|_| {
+                gst::error_msg!(
+                    gst::ResourceError::OpenRead,
+                    [
+                        "Timed out opening Zenoh session after {:?}",
+                        SESSION_OPEN_TIMEOUT
+                    ]
+                )
+            })?
+            .map_err(|e| ZenohError::Init(e).to_error_message())?;
             SessionWrapper::Owned(session)
         };
 
@@ -552,6 +591,10 @@ impl BaseSrcImpl for ZenohSrc {
             .declare_subscriber(key_expr)
             .wait()
             .map_err(|e| ZenohError::Init(e).to_error_message())?;
+        let subscriber = Arc::new(subscriber);
+
+        // Clear any leftover flush signal from a previous run.
+        self.flushing.store(false, Ordering::SeqCst);
 
         // Reacquire state lock to complete transition
         let mut state = self.state.lock().unwrap();
@@ -571,7 +614,6 @@ impl BaseSrcImpl for ZenohSrc {
         *state = State::Started(Started {
             _session: session_wrapper,
             subscriber,
-            flushing: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(Mutex::new(Statistics::default())),
         });
 
@@ -627,10 +669,8 @@ impl BaseSrcImpl for ZenohSrc {
             imp = self,
             "Unlock called - cancelling blocking operations"
         );
-        let state = self.state.lock().unwrap();
-        if let State::Started(ref started) = *state {
-            started.flushing.store(true, Ordering::SeqCst);
-        }
+        // Lock-free: never touch the `state` lock that create() holds across its poll loop.
+        self.flushing.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -640,10 +680,7 @@ impl BaseSrcImpl for ZenohSrc {
             imp = self,
             "Unlock stop called - resuming normal operation"
         );
-        let state = self.state.lock().unwrap();
-        if let State::Started(ref started) = *state {
-            started.flushing.store(false, Ordering::SeqCst);
-        }
+        self.flushing.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -653,18 +690,12 @@ impl BaseSrcImpl for ZenohSrc {
         match event.view() {
             EventView::FlushStart(_) => {
                 gst::debug!(CAT, imp = self, "Flush start - cancelling operations");
-                let state = self.state.lock().unwrap();
-                if let State::Started(ref started) = *state {
-                    started.flushing.store(true, Ordering::SeqCst);
-                }
+                self.flushing.store(true, Ordering::SeqCst);
                 self.parent_event(event)
             }
             EventView::FlushStop(_) => {
                 gst::debug!(CAT, imp = self, "Flush stop - resuming operations");
-                let state = self.state.lock().unwrap();
-                if let State::Started(ref started) = *state {
-                    started.flushing.store(false, Ordering::SeqCst);
-                }
+                self.flushing.store(false, Ordering::SeqCst);
                 self.parent_event(event)
             }
             _ => self.parent_event(event),
@@ -705,59 +736,62 @@ impl PushSrcImpl for ZenohSrc {
         &self,
         _buffer: Option<&mut gst::BufferRef>,
     ) -> Result<CreateSuccess, gst::FlowError> {
-        let state_locked = self.state.lock().unwrap();
-        let State::Started(ref started) = *state_locked else {
-            gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
-            return Err(gst::FlowError::Error);
+        // Clone out the subscriber + stats under a short-lived lock, then release the
+        // `state` lock before the blocking recv loop so flush/unlock (which set
+        // `self.flushing`) and state changes are never queued behind create().
+        let (subscriber, stats) = {
+            let state_locked = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let State::Started(ref started) = *state_locked else {
+                gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
+                return Err(gst::FlowError::Error);
+            };
+            (started.subscriber.clone(), started.stats.clone())
         };
 
         // Check if we're flushing before attempting to receive
-        if started.flushing.load(Ordering::SeqCst) {
+        if self.flushing.load(Ordering::SeqCst) {
             gst::debug!(CAT, imp = self, "Flushing - returning Flushing flow");
             return Err(gst::FlowError::Flushing);
         }
 
         // Get the configured settings
         let (receive_timeout_ms, apply_buffer_meta) = {
-            let settings = self.settings.lock().unwrap();
+            let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
             (settings.receive_timeout_ms, settings.apply_buffer_meta)
         };
 
         // CRITICAL: Use recv_timeout() instead of blocking recv()
         // This allows us to check the flushing flag periodically without sleeping
         let sample: zenoh::sample::Sample = loop {
-            if started.flushing.load(Ordering::SeqCst) {
+            if self.flushing.load(Ordering::SeqCst) {
                 gst::debug!(CAT, imp = self, "Flushing detected during receive");
                 return Err(gst::FlowError::Flushing);
             }
 
             // Use recv_timeout with configurable timeout to remain responsive to flushing
             // recv_timeout returns Result<Option<Sample>, RecvTimeoutError>
-            match started
-                .subscriber
-                .recv_timeout(Duration::from_millis(receive_timeout_ms))
-            {
+            match subscriber.recv_timeout(Duration::from_millis(receive_timeout_ms)) {
                 Ok(Some(sample)) => break sample,
                 Ok(None) => {
                     // No sample available, continue loop
                     continue;
                 }
                 Err(e) => {
-                    // Check if it's a timeout or disconnection
-                    let err_msg = format!("{:?}", e);
-                    if err_msg.contains("Timeout") {
-                        // Timeout - check flushing flag and retry
-                        continue;
-                    } else {
-                        // Disconnected or other error
-                        started.stats.lock().unwrap().errors += 1;
-                        gst::element_imp_error!(
-                            self,
-                            gst::ResourceError::Read,
-                            ["Subscriber error: {}", e]
-                        );
-                        return Err(gst::FlowError::Error);
+                    // `recv_timeout` maps an expired timeout to `Ok(None)` (handled
+                    // above), so an `Err` here is a genuine disconnect — the channel's
+                    // senders were dropped (subscriber undeclared / session closed).
+                    // Never classify by formatting the error string.
+                    if self.flushing.load(Ordering::SeqCst) {
+                        gst::debug!(CAT, imp = self, "Subscriber closed while flushing");
+                        return Err(gst::FlowError::Flushing);
                     }
+                    stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                    gst::element_imp_error!(
+                        self,
+                        gst::ResourceError::Read,
+                        ["Subscriber disconnected: {}", e]
+                    );
+                    return Err(gst::FlowError::Error);
                 }
             }
         };
@@ -782,11 +816,10 @@ impl PushSrcImpl for ZenohSrc {
                         }
                     }
 
-                    // Check for compression metadata
+                    // Check for compression metadata (first-class field).
                     let compression = metadata
-                        .user_metadata()
-                        .get(crate::metadata::keys::COMPRESSION)
-                        .and_then(|v| crate::compression::CompressionType::from_metadata_value(v));
+                        .compression()
+                        .and_then(crate::compression::CompressionType::from_metadata_value);
 
                     // Log any user metadata
                     if !metadata.user_metadata().is_empty() {
@@ -817,6 +850,25 @@ impl PushSrcImpl for ZenohSrc {
         let parsed_metadata = if let Some(attachment) = sample.attachment() {
             match MetadataParser::parse(attachment) {
                 Ok(metadata) => {
+                    // This build has no compression features. If the sender compressed
+                    // the payload, we cannot decode it — fail clearly instead of pushing
+                    // compressed bytes downstream as if they were raw.
+                    if let Some(algo) = metadata.compression()
+                        && algo != "none"
+                    {
+                        stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                        gst::element_imp_error!(
+                            self,
+                            gst::StreamError::Decode,
+                            [
+                                "Received '{}'-compressed payload but this build has no \
+                                 compression features enabled",
+                                algo
+                            ]
+                        );
+                        return Err(gst::FlowError::Error);
+                    }
+
                     // If caps are present in metadata, set them on the source pad
                     if let Some(caps) = metadata.caps() {
                         gst::debug!(CAT, imp = self, "Received caps from metadata: {}", caps);
@@ -871,7 +923,7 @@ impl PushSrcImpl for ZenohSrc {
                     decompressed
                 }
                 Err(e) => {
-                    started.stats.lock().unwrap().errors += 1;
+                    stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
                     gst::element_imp_error!(
                         self,
                         gst::StreamError::Decode,
@@ -983,10 +1035,11 @@ impl PushSrcImpl for ZenohSrc {
         }
 
         // Update statistics on success
-        let mut stats = started.stats.lock().unwrap();
-        stats.bytes_received += slice.len() as u64;
-        stats.messages_received += 1;
-        drop(stats);
+        {
+            let mut stats = stats.lock().unwrap_or_else(|e| e.into_inner());
+            stats.bytes_received += slice.len() as u64;
+            stats.messages_received += 1;
+        }
 
         Ok(CreateSuccess::NewBuffer(buffer))
     }

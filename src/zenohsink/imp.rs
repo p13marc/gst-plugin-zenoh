@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use gst::subclass::prelude::URIHandlerImpl;
 use gst::{glib, prelude::*, subclass::prelude::*};
@@ -26,7 +28,6 @@ struct Statistics {
     bytes_sent: u64,
     messages_sent: u64,
     errors: u64,
-    dropped: u64, // For congestion-control=drop mode
     #[cfg(any(
         feature = "compression-zstd",
         feature = "compression-lz4",
@@ -41,16 +42,52 @@ struct Statistics {
     bytes_after_compression: u64,
 }
 
+/// Default timeout bounding `zenoh::open(...).wait()` during NULL→READY so an
+/// unreachable router can't stall the state-change thread forever.
+const SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A publish request handed to the background publish worker thread.
+///
+/// The worker owns the Zenoh publisher and performs the (potentially blocking)
+/// `put().wait()` off the GStreamer streaming thread, so `render()` never holds
+/// the `state` lock across network I/O and can be bounded/cancelled.
+struct PublishJob {
+    payload: zenoh::bytes::ZBytes,
+    attachment: Option<zenoh::bytes::ZBytes>,
+    ack: flume::Sender<Result<(), zenoh::Error>>,
+}
+
+/// Outcome of submitting a [`PublishJob`] and awaiting its acknowledgement.
+enum PublishOutcome {
+    /// Publish completed successfully.
+    Ok,
+    /// Zenoh reported a publish error.
+    Failed(zenoh::Error),
+    /// The element was unlocked/flushing while waiting — abandon the publish.
+    Flushing,
+    /// The configured `publish-timeout-ms` elapsed before completion.
+    TimedOut,
+    /// The publish worker thread is gone (channel disconnected).
+    WorkerGone,
+}
+
 /// Zenoh resources created during NULL→READY transition.
 ///
-/// These are lightweight network resources (session + publisher + matching listener)
-/// that allow detecting subscriber presence without consuming pipeline resources.
-/// No data flows until the pipeline reaches PLAYING state.
+/// These are lightweight network resources (session + publish worker + matching
+/// listener) that allow detecting subscriber presence without consuming pipeline
+/// resources. No data flows until the pipeline reaches PLAYING state.
 struct ReadyState {
-    // Keeping session field to maintain ownership and prevent session from being dropped
-    // while publisher is still in use. This can be either owned or shared.
+    /// Channel to the background publish worker that owns the Zenoh publisher.
+    /// Declared before `_session` so it drops first on teardown: dropping the
+    /// sender makes the worker observe a disconnected channel and exit.
+    publish_tx: flume::Sender<PublishJob>,
+    /// Worker thread handle. Detached on drop (we never join, so teardown can't
+    /// hang behind an in-flight block-mode publish); the worker exits on its own
+    /// once `publish_tx` is dropped and any in-flight `put()` returns.
+    _worker: Option<JoinHandle<()>>,
+    // Keeping session field to maintain ownership and prevent session from being
+    // dropped while the worker's publisher is still in use. Owned or shared.
     _session: SessionWrapper,
-    publisher: zenoh::pubsub::Publisher<'static>,
     /// Whether there are currently matching Zenoh subscribers.
     /// Updated via Zenoh's background matching listener callback.
     has_subscribers: Arc<AtomicBool>,
@@ -82,8 +119,15 @@ struct Started {
 enum SessionWrapper {
     /// Element created this session (will be dropped when element stops)
     Owned(zenoh::Session),
-    /// Element is using a shared session (may outlive this element)
+    /// Element is using an externally-provided shared session (Rust API); the
+    /// caller owns its lifetime, so this element does not release it.
     Shared(zenoh::Session),
+    /// Element is using a session from the named group registry; dropping this
+    /// releases one reference (closing the session on the last release).
+    SharedGroup {
+        session: zenoh::Session,
+        group: String,
+    },
 }
 
 impl SessionWrapper {
@@ -92,6 +136,15 @@ impl SessionWrapper {
         match self {
             SessionWrapper::Owned(session) => session,
             SessionWrapper::Shared(session) => session,
+            SessionWrapper::SharedGroup { session, .. } => session,
+        }
+    }
+}
+
+impl Drop for SessionWrapper {
+    fn drop(&mut self) {
+        if let SessionWrapper::SharedGroup { group, .. } = self {
+            crate::session::release_session(group);
         }
     }
 }
@@ -163,6 +216,9 @@ struct Settings {
     caps_interval: u32,
     /// Send buffer timing metadata (PTS, DTS, duration, flags) with each buffer (default: true)
     send_buffer_meta: bool,
+    /// Maximum time in milliseconds to wait for a single publish to complete before
+    /// giving up (0 = wait indefinitely). Bounds `render()` so shutdown/flush can't hang.
+    publish_timeout_ms: u64,
     /// Compression algorithm to use (requires compression features)
     #[cfg(any(
         feature = "compression-zstd",
@@ -192,9 +248,10 @@ impl Default for Settings {
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
             express: false,
-            send_caps: true,        // Default to sending caps for ease of use
-            caps_interval: 1,       // Send caps every 1 second by default
-            send_buffer_meta: true, // Default to sending buffer timing metadata
+            send_caps: true,          // Default to sending caps for ease of use
+            caps_interval: 1,         // Send caps every 1 second by default
+            send_buffer_meta: true,   // Default to sending buffer timing metadata
+            publish_timeout_ms: 5000, // Bound publishes at 5s by default to avoid shutdown hangs
             #[cfg(any(
                 feature = "compression-zstd",
                 feature = "compression-lz4",
@@ -234,6 +291,9 @@ pub struct ZenohSink {
     settings: Mutex<Settings>,
     /// Current operational state
     state: Mutex<State>,
+    /// Set when the base sink calls `unlock()` (or a flush starts) so an in-flight
+    /// `render()` abandons its publish wait promptly without touching `state`.
+    unlocked: Arc<AtomicBool>,
 }
 
 impl Default for ZenohSink {
@@ -241,6 +301,7 @@ impl Default for ZenohSink {
         Self {
             settings: Mutex::new(Settings::default()),
             state: Mutex::new(State::default()),
+            unlocked: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -286,7 +347,10 @@ impl ZenohSink {
             gst::debug!(CAT, "Using session group '{}'", group);
             let session = crate::session::get_or_create_session(group, config_file.as_deref())
                 .map_err(|e| ZenohError::Init(e).to_error_message())?;
-            SessionWrapper::Shared(session)
+            SessionWrapper::SharedGroup {
+                session,
+                group: group.clone(),
+            }
         } else {
             gst::debug!(CAT, "Creating new Zenoh session");
             let config = match config_file {
@@ -297,9 +361,20 @@ impl ZenohSink {
                 }
                 _ => zenoh::Config::default(),
             };
-            let session = zenoh::open(config)
-                .wait()
-                .map_err(|e| ZenohError::Init(e).to_error_message())?;
+            // Bound the open so an unreachable router can't stall the state change.
+            let session = crate::utils::call_with_timeout(SESSION_OPEN_TIMEOUT, move || {
+                zenoh::open(config).wait()
+            })
+            .map_err(|_| {
+                gst::error_msg!(
+                    gst::ResourceError::OpenWrite,
+                    [
+                        "Timed out opening Zenoh session after {:?}",
+                        SESSION_OPEN_TIMEOUT
+                    ]
+                )
+            })?
+            .map_err(|e| ZenohError::Init(e).to_error_message())?;
             SessionWrapper::Owned(session)
         };
 
@@ -414,11 +489,292 @@ impl ZenohSink {
             );
         }
 
+        // Spawn the publish worker that owns the publisher. Performing publishes on a
+        // dedicated thread keeps the blocking `put().wait()` off the streaming thread,
+        // so `render()` never holds the `state` lock across network I/O.
+        let (publish_tx, publish_rx) = flume::unbounded::<PublishJob>();
+        let worker = std::thread::Builder::new()
+            .name("zenohsink-publish".into())
+            .spawn(move || {
+                // `publisher` is moved here and lives for the worker's lifetime, which
+                // also keeps the background matching listener active.
+                while let Ok(job) = publish_rx.recv() {
+                    let PublishJob {
+                        payload,
+                        attachment,
+                        ack,
+                    } = job;
+                    let builder = publisher.put(payload);
+                    let res = match attachment {
+                        Some(att) => builder.attachment(att).wait(),
+                        None => builder.wait(),
+                    };
+                    // Receiver may be gone (render() bailed on timeout/flush); ignore.
+                    let _ = ack.send(res);
+                }
+            })
+            .map_err(|e| {
+                gst::error_msg!(
+                    gst::ResourceError::Failed,
+                    ["Failed to spawn publish worker thread: {}", e]
+                )
+            })?;
+
         Ok(ReadyState {
+            publish_tx,
+            _worker: Some(worker),
             _session: session_wrapper,
-            publisher,
             has_subscribers,
         })
+    }
+
+    /// Submit a publish job to the worker and wait (bounded) for its result.
+    ///
+    /// Returns promptly as [`PublishOutcome::Flushing`] if the element is unlocked
+    /// while waiting, and as [`PublishOutcome::TimedOut`] once `publish_timeout_ms`
+    /// elapses — so the streaming thread can never block indefinitely on a publish.
+    fn submit_publish(
+        &self,
+        publish_tx: &flume::Sender<PublishJob>,
+        payload: zenoh::bytes::ZBytes,
+        attachment: Option<zenoh::bytes::ZBytes>,
+        publish_timeout_ms: u64,
+    ) -> PublishOutcome {
+        let (ack_tx, ack_rx) = flume::bounded(1);
+        if publish_tx
+            .send(PublishJob {
+                payload,
+                attachment,
+                ack: ack_tx,
+            })
+            .is_err()
+        {
+            return PublishOutcome::WorkerGone;
+        }
+
+        let deadline = (publish_timeout_ms > 0)
+            .then(|| Instant::now() + Duration::from_millis(publish_timeout_ms));
+
+        loop {
+            if self.unlocked.load(Ordering::SeqCst) {
+                return PublishOutcome::Flushing;
+            }
+            match ack_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(Ok(())) => return PublishOutcome::Ok,
+                Ok(Err(e)) => return PublishOutcome::Failed(e),
+                Err(flume::RecvTimeoutError::Timeout) => {
+                    if let Some(d) = deadline
+                        && Instant::now() >= d
+                    {
+                        return PublishOutcome::TimedOut;
+                    }
+                }
+                Err(flume::RecvTimeoutError::Disconnected) => return PublishOutcome::WorkerGone,
+            }
+        }
+    }
+
+    /// Decide whether caps should be attached to the current buffer (first buffer,
+    /// caps change, or periodic interval), updating the shared caps-tracking state.
+    /// Returns the caps to attach, or `None`.
+    fn decide_caps_to_send(
+        &self,
+        current_caps: Option<gst::Caps>,
+        send_caps: bool,
+        caps_interval: u32,
+        caps_sent: &AtomicBool,
+        last_caps: &Mutex<Option<gst::Caps>>,
+        last_caps_time: &Mutex<Option<Instant>>,
+    ) -> Option<gst::Caps> {
+        if !send_caps {
+            return None;
+        }
+        let caps = current_caps?;
+        let mut should_send = false;
+
+        if !caps_sent.load(Ordering::Acquire) {
+            should_send = true;
+            caps_sent.store(true, Ordering::Release);
+            *last_caps.lock().unwrap_or_else(|e| e.into_inner()) = Some(caps.clone());
+            *last_caps_time.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        } else {
+            let last = last_caps.lock().unwrap_or_else(|e| e.into_inner());
+            if last.as_ref() != Some(&caps) {
+                should_send = true;
+                drop(last);
+                *last_caps.lock().unwrap_or_else(|e| e.into_inner()) = Some(caps.clone());
+                *last_caps_time.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            } else if caps_interval > 0 {
+                let last_time = last_caps_time.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(t) = *last_time
+                    && t.elapsed().as_secs() >= caps_interval as u64
+                {
+                    should_send = true;
+                    drop(last_time);
+                    *last_caps_time.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(Instant::now());
+                }
+            }
+        }
+
+        should_send.then_some(caps)
+    }
+
+    /// Encode a single buffer (optional compression + metadata) and publish it via
+    /// the worker. Shared by `render()` and `render_list()` so batched buffers get
+    /// identical compression and buffer-timing metadata. Updates success stats on
+    /// `Ok`; the caller maps failures to a flow return.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_and_publish(
+        &self,
+        data: &[u8],
+        buffer: &gst::BufferRef,
+        caps: Option<&gst::Caps>,
+        send_buffer_meta: bool,
+        publish_tx: &flume::Sender<PublishJob>,
+        stats: &Arc<Mutex<Statistics>>,
+        publish_timeout_ms: u64,
+    ) -> PublishOutcome {
+        #[cfg(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        ))]
+        let original_size = data.len();
+
+        // Apply compression if configured.
+        #[cfg(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        ))]
+        let (payload_bytes, compressed) = {
+            let (compression_type, compression_level) = {
+                let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+                (settings.compression, settings.compression_level)
+            };
+            if compression_type != crate::compression::CompressionType::None {
+                match crate::compression::compress(data, compression_type, compression_level) {
+                    Ok(c) => (c, true),
+                    Err(e) => {
+                        gst::warning!(
+                            CAT,
+                            imp = self,
+                            "Compression failed: {}, sending uncompressed",
+                            e
+                        );
+                        stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                        (data.to_vec(), false)
+                    }
+                }
+            } else {
+                (data.to_vec(), false)
+            }
+        };
+
+        #[cfg(not(any(
+            feature = "compression-zstd",
+            feature = "compression-lz4",
+            feature = "compression-gzip"
+        )))]
+        let (payload_bytes, compressed) = (data.to_vec(), false);
+
+        // Build the attachment if any metadata is needed.
+        let needs_attachment = caps.is_some() || send_buffer_meta || compressed;
+        let attachment = if needs_attachment {
+            let mut mb = MetadataBuilder::new();
+            if let Some(caps) = caps {
+                mb = mb.caps(caps);
+            }
+            if send_buffer_meta {
+                mb = mb.buffer_timing(buffer);
+            }
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            if compressed {
+                let algo = {
+                    let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+                    settings.compression.to_metadata_value()
+                };
+                mb = mb.compression(algo);
+            }
+            mb.build()
+        } else {
+            None
+        };
+
+        let payload_len = payload_bytes.len() as u64;
+        let payload = zenoh::bytes::ZBytes::from(payload_bytes);
+        let outcome = self.submit_publish(publish_tx, payload, attachment, publish_timeout_ms);
+
+        if matches!(outcome, PublishOutcome::Ok) {
+            let mut s = stats.lock().unwrap_or_else(|e| e.into_inner());
+            s.bytes_sent += payload_len;
+            s.messages_sent += 1;
+            #[cfg(any(
+                feature = "compression-zstd",
+                feature = "compression-lz4",
+                feature = "compression-gzip"
+            ))]
+            if compressed {
+                s.bytes_before_compression += original_size as u64;
+                s.bytes_after_compression += payload_len;
+            }
+        }
+
+        outcome
+    }
+
+    /// Map a single-buffer publish outcome to a GStreamer flow return, posting an
+    /// element error and updating the error stat where appropriate.
+    fn outcome_to_flow(
+        &self,
+        outcome: PublishOutcome,
+        stats: &Arc<Mutex<Statistics>>,
+        publish_timeout_ms: u64,
+    ) -> Result<gst::FlowSuccess, gst::FlowError> {
+        match outcome {
+            PublishOutcome::Ok => Ok(gst::FlowSuccess::Ok),
+            PublishOutcome::Failed(e) => {
+                stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                let key_expr = self
+                    .settings
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .key_expr
+                    .clone();
+                let err = ZenohError::Publish {
+                    key_expr,
+                    source: e,
+                };
+                gst::element_imp_error!(self, gst::ResourceError::Write, ["{}", err]);
+                Err(err.to_flow_error())
+            }
+            PublishOutcome::Flushing => {
+                gst::debug!(CAT, imp = self, "Publish abandoned: element is flushing");
+                Err(gst::FlowError::Flushing)
+            }
+            PublishOutcome::TimedOut => {
+                stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                gst::element_imp_error!(
+                    self,
+                    gst::ResourceError::Write,
+                    ["Publish timed out after {} ms", publish_timeout_ms]
+                );
+                Err(gst::FlowError::Error)
+            }
+            PublishOutcome::WorkerGone => {
+                gst::element_imp_error!(
+                    self,
+                    gst::CoreError::Failed,
+                    ["Publish worker thread is not available"]
+                );
+                Err(gst::FlowError::Error)
+            }
+        }
     }
 }
 
@@ -557,6 +913,12 @@ impl ObjectImpl for ZenohSink {
                     .blurb("Send buffer timing metadata (PTS, DTS, duration, offset, flags) with each buffer for proper A/V sync")
                     .default_value(true)
                     .build(),
+                // Publish timeout property
+                glib::ParamSpecUInt64::builder("publish-timeout-ms")
+                    .nick("Publish Timeout")
+                    .blurb("Maximum time in milliseconds to wait for a single publish to complete before giving up (0 = wait indefinitely). Bounds render() so shutdown/flush cannot hang.")
+                    .default_value(5000)
+                    .build(),
                 // Compression properties (conditional on features)
                 #[cfg(any(
                     feature = "compression-zstd",
@@ -605,11 +967,6 @@ impl ObjectImpl for ZenohSink {
                 glib::ParamSpecUInt64::builder("errors")
                     .nick("Errors")
                     .blurb("Total number of errors encountered")
-                    .read_only()
-                    .build(),
-                glib::ParamSpecUInt64::builder("dropped")
-                    .nick("Dropped")
-                    .blurb("Total messages dropped due to congestion (drop mode)")
                     .read_only()
                     .build(),
                 // Compression statistics (conditional on features)
@@ -738,6 +1095,9 @@ impl ObjectImpl for ZenohSink {
             "send-buffer-meta" => {
                 settings.send_buffer_meta = value.get::<bool>().expect("type checked upstream");
             }
+            "publish-timeout-ms" => {
+                settings.publish_timeout_ms = value.get::<u64>().expect("type checked upstream");
+            }
             #[cfg(any(
                 feature = "compression-zstd",
                 feature = "compression-lz4",
@@ -781,7 +1141,8 @@ impl ObjectImpl for ZenohSink {
         match pspec.name() {
             // Configuration properties - read from settings
             "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
-            | "express" | "send-caps" | "caps-interval" | "send-buffer-meta" | "session-group" => {
+            | "express" | "send-caps" | "caps-interval" | "send-buffer-meta"
+            | "publish-timeout-ms" | "session-group" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
@@ -793,6 +1154,7 @@ impl ObjectImpl for ZenohSink {
                     "send-caps" => settings.send_caps.to_value(),
                     "caps-interval" => settings.caps_interval.to_value(),
                     "send-buffer-meta" => settings.send_buffer_meta.to_value(),
+                    "publish-timeout-ms" => settings.publish_timeout_ms.to_value(),
                     "session-group" => settings.session_group.to_value(),
                     _ => unreachable!(),
                 }
@@ -825,7 +1187,7 @@ impl ObjectImpl for ZenohSink {
                 }
             }
             // Statistics properties - only available in Started state (data is flowing)
-            "bytes-sent" | "messages-sent" | "errors" | "dropped" => {
+            "bytes-sent" | "messages-sent" | "errors" => {
                 let state = self.state.lock().unwrap();
                 if let State::Started(ref started) = *state {
                     let stats = started.stats.lock().unwrap();
@@ -833,7 +1195,6 @@ impl ObjectImpl for ZenohSink {
                         "bytes-sent" => stats.bytes_sent.to_value(),
                         "messages-sent" => stats.messages_sent.to_value(),
                         "errors" => stats.errors.to_value(),
-                        "dropped" => stats.dropped.to_value(),
                         _ => unreachable!(),
                     }
                 } else {
@@ -923,6 +1284,9 @@ impl BaseSinkImpl for ZenohSink {
 
         gst::debug!(CAT, "ZenohSink transitioning from Ready to Started");
 
+        // Clear any leftover unlock/flush signal from a previous run.
+        self.unlocked.store(false, Ordering::SeqCst);
+
         // Take the ReadyState and promote it to Started with render-time resources
         let ready_state = match std::mem::replace(&mut *state, State::Starting) {
             State::Ready(ready) => ready,
@@ -942,10 +1306,37 @@ impl BaseSinkImpl for ZenohSink {
     }
 
     fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let state_locked = self.state.lock().unwrap();
-        let State::Started(ref started) = *state_locked else {
-            gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
-            return Err(gst::FlowError::Error);
+        // Clone out the render-time resources under a short-lived lock, then release
+        // it before any (blocking) network I/O so stats and state transitions stay
+        // observable during active traffic.
+        let (publish_tx, stats, caps_sent, last_caps, last_caps_time, publish_timeout_ms) = {
+            let state_locked = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let State::Started(ref started) = *state_locked else {
+                gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
+                return Err(gst::FlowError::Error);
+            };
+            let publish_timeout_ms = self
+                .settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .publish_timeout_ms;
+            (
+                started.ready.publish_tx.clone(),
+                started.stats.clone(),
+                started.caps_sent.clone(),
+                started.last_caps.clone(),
+                started.last_caps_time.clone(),
+                publish_timeout_ms,
+            )
+        };
+
+        let (send_caps, caps_interval, send_buffer_meta) = {
+            let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                settings.send_caps,
+                settings.caps_interval,
+                settings.send_buffer_meta,
+            )
         };
 
         // Get buffer data with proper error handling
@@ -958,293 +1349,25 @@ impl BaseSinkImpl for ZenohSink {
             gst::FlowError::Error
         })?;
 
-        // Get original size for compression statistics
-        #[cfg(any(
-            feature = "compression-zstd",
-            feature = "compression-lz4",
-            feature = "compression-gzip"
-        ))]
-        let original_size = b.len();
+        let caps_to_send = self.decide_caps_to_send(
+            self.obj().sink_pad().current_caps(),
+            send_caps,
+            caps_interval,
+            &caps_sent,
+            &last_caps,
+            &last_caps_time,
+        );
 
-        #[cfg(any(
-            feature = "compression-zstd",
-            feature = "compression-lz4",
-            feature = "compression-gzip"
-        ))]
-        let (compression_type, compression_level) = {
-            let settings = self.settings.lock().unwrap();
-            (settings.compression, settings.compression_level)
-        };
-
-        // Apply compression if enabled
-        // Use Cow to avoid unnecessary copy when compression is disabled
-        #[cfg(any(
-            feature = "compression-zstd",
-            feature = "compression-lz4",
-            feature = "compression-gzip"
-        ))]
-        let (data_to_send, compressed): (std::borrow::Cow<'_, [u8]>, bool) = if compression_type
-            != crate::compression::CompressionType::None
-        {
-            match crate::compression::compress(b.as_slice(), compression_type, compression_level) {
-                Ok(compressed_data) => {
-                    gst::trace!(
-                        CAT,
-                        imp = self,
-                        "Compressed {} bytes to {} bytes using {:?} (level {}), ratio: {:.2}%",
-                        original_size,
-                        compressed_data.len(),
-                        compression_type,
-                        compression_level,
-                        (compressed_data.len() as f64 / original_size as f64) * 100.0
-                    );
-                    (std::borrow::Cow::Owned(compressed_data), true)
-                }
-                Err(e) => {
-                    gst::warning!(
-                        CAT,
-                        imp = self,
-                        "Compression failed: {}, sending uncompressed",
-                        e
-                    );
-                    started.stats.lock().unwrap().errors += 1;
-                    // No copy - borrow the original slice
-                    (std::borrow::Cow::Borrowed(b.as_slice()), false)
-                }
-            }
-        } else {
-            // No compression - borrow the original slice (zero-copy)
-            (std::borrow::Cow::Borrowed(b.as_slice()), false)
-        };
-
-        #[cfg(not(any(
-            feature = "compression-zstd",
-            feature = "compression-lz4",
-            feature = "compression-gzip"
-        )))]
-        // No compression features - borrow the original slice (zero-copy)
-        let (data_to_send, compressed): (std::borrow::Cow<'_, [u8]>, bool) =
-            (std::borrow::Cow::Borrowed(b.as_slice()), false);
-
-        // Smart caps transmission: send caps when needed, not on every buffer
-        let (send_caps, caps_interval, send_buffer_meta) = {
-            let settings = self.settings.lock().unwrap();
-            (
-                settings.send_caps,
-                settings.caps_interval,
-                settings.send_buffer_meta,
-            )
-        };
-
-        let attachment = if send_caps {
-            if let Some(caps) = self.obj().sink_pad().current_caps() {
-                let mut should_send = false;
-
-                // Check if this is the first buffer (always send)
-                if !started.caps_sent.load(Ordering::Acquire) {
-                    gst::debug!(CAT, imp = self, "Sending caps on first buffer: {}", caps);
-                    should_send = true;
-                    started.caps_sent.store(true, Ordering::Release);
-                    *started.last_caps.lock().unwrap() = Some(caps.clone());
-                    *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
-                } else {
-                    // Check if caps have changed (always send on change)
-                    let last_caps = started.last_caps.lock().unwrap();
-                    if last_caps.as_ref() != Some(&caps) {
-                        gst::debug!(
-                            CAT,
-                            imp = self,
-                            "Caps changed, sending updated caps: {}",
-                            caps
-                        );
-                        should_send = true;
-                        drop(last_caps);
-                        *started.last_caps.lock().unwrap() = Some(caps.clone());
-                        *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
-                    } else if caps_interval > 0 {
-                        // Check if it's time for periodic transmission
-                        let last_time = started.last_caps_time.lock().unwrap();
-                        if let Some(last) = *last_time
-                            && last.elapsed().as_secs() >= caps_interval as u64
-                        {
-                            gst::trace!(
-                                CAT,
-                                imp = self,
-                                "Periodic caps transmission (interval: {}s)",
-                                caps_interval
-                            );
-                            should_send = true;
-                            drop(last_time);
-                            *started.last_caps_time.lock().unwrap() =
-                                Some(std::time::Instant::now());
-                        }
-                    }
-                }
-
-                if should_send {
-                    let mut metadata_builder = MetadataBuilder::new().caps(&caps);
-
-                    // Add buffer timing metadata if enabled
-                    if send_buffer_meta {
-                        metadata_builder = metadata_builder.buffer_timing(buffer);
-                    }
-
-                    // Add compression metadata if compressed
-                    #[cfg(any(
-                        feature = "compression-zstd",
-                        feature = "compression-lz4",
-                        feature = "compression-gzip"
-                    ))]
-                    if compressed {
-                        metadata_builder = metadata_builder.user_metadata(
-                            crate::metadata::keys::COMPRESSION,
-                            compression_type.to_metadata_value(),
-                        );
-                    }
-
-                    metadata_builder.build()
-                } else {
-                    // Not sending caps, but may still need buffer timing or compression metadata
-                    let needs_metadata = send_buffer_meta || compressed;
-
-                    if needs_metadata {
-                        let mut metadata_builder = MetadataBuilder::new();
-
-                        if send_buffer_meta {
-                            metadata_builder = metadata_builder.buffer_timing(buffer);
-                        }
-
-                        #[cfg(any(
-                            feature = "compression-zstd",
-                            feature = "compression-lz4",
-                            feature = "compression-gzip"
-                        ))]
-                        if compressed {
-                            metadata_builder = metadata_builder.user_metadata(
-                                crate::metadata::keys::COMPRESSION,
-                                compression_type.to_metadata_value(),
-                            );
-                        }
-
-                        metadata_builder.build()
-                    } else {
-                        None
-                    }
-                }
-            } else {
-                // No caps available, but may still need buffer timing or compression metadata
-                let needs_metadata = send_buffer_meta || compressed;
-
-                if needs_metadata {
-                    let mut metadata_builder = MetadataBuilder::new();
-
-                    if send_buffer_meta {
-                        metadata_builder = metadata_builder.buffer_timing(buffer);
-                    }
-
-                    #[cfg(any(
-                        feature = "compression-zstd",
-                        feature = "compression-lz4",
-                        feature = "compression-gzip"
-                    ))]
-                    if compressed {
-                        metadata_builder = metadata_builder.user_metadata(
-                            crate::metadata::keys::COMPRESSION,
-                            compression_type.to_metadata_value(),
-                        );
-                    }
-
-                    metadata_builder.build()
-                } else {
-                    None
-                }
-            }
-        } else {
-            // send_caps is false, but may still need buffer timing or compression metadata
-            let needs_metadata = send_buffer_meta || compressed;
-
-            if needs_metadata {
-                let mut metadata_builder = MetadataBuilder::new();
-
-                if send_buffer_meta {
-                    metadata_builder = metadata_builder.buffer_timing(buffer);
-                }
-
-                #[cfg(any(
-                    feature = "compression-zstd",
-                    feature = "compression-lz4",
-                    feature = "compression-gzip"
-                ))]
-                if compressed {
-                    metadata_builder = metadata_builder.user_metadata(
-                        crate::metadata::keys::COMPRESSION,
-                        compression_type.to_metadata_value(),
-                    );
-                }
-
-                metadata_builder.build()
-            } else {
-                None
-            }
-        };
-
-        // Send with caps attachment
-        // Note: Zenoh's wait() already handles timeouts internally
-        let put_builder = started.ready.publisher.put(&data_to_send);
-        let result = if let Some(attachment) = attachment {
-            put_builder.attachment(attachment).wait()
-        } else {
-            put_builder.wait()
-        };
-
-        match result {
-            Ok(_) => {
-                // Update statistics on success
-                let mut stats = started.stats.lock().unwrap();
-                stats.bytes_sent += data_to_send.len() as u64;
-                stats.messages_sent += 1;
-
-                #[cfg(any(
-                    feature = "compression-zstd",
-                    feature = "compression-lz4",
-                    feature = "compression-gzip"
-                ))]
-                if compressed {
-                    stats.bytes_before_compression += original_size as u64;
-                    stats.bytes_after_compression += data_to_send.len() as u64;
-                }
-
-                Ok(gst::FlowSuccess::Ok)
-            }
-            Err(e) => {
-                // Update error statistics
-                started.stats.lock().unwrap().errors += 1;
-
-                // Get key expression for better error reporting
-                let key_expr = self.settings.lock().unwrap().key_expr.clone();
-
-                // Check if this is a network-related error before consuming e
-                let error_msg = format!("{}", e);
-                let err = ZenohError::Publish {
-                    key_expr,
-                    source: e,
-                };
-
-                if error_msg.contains("timeout")
-                    || error_msg.contains("connection")
-                    || error_msg.contains("network")
-                {
-                    gst::element_imp_error!(
-                        self,
-                        gst::ResourceError::Write,
-                        ["Network error while publishing: {}", err]
-                    );
-                } else {
-                    gst::element_imp_error!(self, gst::ResourceError::Write, ["{}", err]);
-                }
-                Err(err.to_flow_error())
-            }
-        }
+        let outcome = self.encode_and_publish(
+            b.as_slice(),
+            buffer,
+            caps_to_send.as_ref(),
+            send_buffer_meta,
+            &publish_tx,
+            &stats,
+            publish_timeout_ms,
+        );
+        self.outcome_to_flow(outcome, &stats, publish_timeout_ms)
     }
 
     fn render_list(&self, list: &gst::BufferList) -> Result<gst::FlowSuccess, gst::FlowError> {
@@ -1255,74 +1378,55 @@ impl BaseSinkImpl for ZenohSink {
             list.len()
         );
 
-        let state_locked = self.state.lock().unwrap();
-        let State::Started(ref started) = *state_locked else {
-            gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
-            return Err(gst::FlowError::Error);
+        // Clone out render-time resources under a short-lived lock, then release it
+        // before doing any network I/O (mirrors render()).
+        let (publish_tx, stats, caps_sent, last_caps, last_caps_time, publish_timeout_ms) = {
+            let state_locked = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let State::Started(ref started) = *state_locked else {
+                gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
+                return Err(gst::FlowError::Error);
+            };
+            let publish_timeout_ms = self
+                .settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .publish_timeout_ms;
+            (
+                started.ready.publish_tx.clone(),
+                started.stats.clone(),
+                started.caps_sent.clone(),
+                started.last_caps.clone(),
+                started.last_caps_time.clone(),
+                publish_timeout_ms,
+            )
         };
 
         // Track statistics for the batch
-        let mut total_bytes = 0u64;
         let mut total_messages = 0u64;
         let mut errors_count = 0u64;
 
-        // Get caps settings
-        let (send_caps, caps_interval) = {
-            let settings = self.settings.lock().unwrap();
-            (settings.send_caps, settings.caps_interval)
+        let (send_caps, caps_interval, send_buffer_meta) = {
+            let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                settings.send_caps,
+                settings.caps_interval,
+                settings.send_buffer_meta,
+            )
         };
 
-        let caps_attachment = if send_caps {
-            if let Some(caps) = self.obj().sink_pad().current_caps() {
-                let mut should_send = false;
+        // Decide caps once for the batch; attach only to the first buffer that goes out.
+        let mut caps_to_send = self.decide_caps_to_send(
+            self.obj().sink_pad().current_caps(),
+            send_caps,
+            caps_interval,
+            &caps_sent,
+            &last_caps,
+            &last_caps_time,
+        );
 
-                if !started.caps_sent.load(Ordering::Acquire) {
-                    gst::debug!(
-                        CAT,
-                        imp = self,
-                        "Sending caps on first buffer list: {}",
-                        caps
-                    );
-                    should_send = true;
-                    started.caps_sent.store(true, Ordering::Release);
-                    *started.last_caps.lock().unwrap() = Some(caps.clone());
-                    *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
-                } else {
-                    let last_caps = started.last_caps.lock().unwrap();
-                    if last_caps.as_ref() != Some(&caps) {
-                        gst::debug!(CAT, imp = self, "Caps changed in buffer list: {}", caps);
-                        should_send = true;
-                        drop(last_caps);
-                        *started.last_caps.lock().unwrap() = Some(caps.clone());
-                        *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
-                    } else if caps_interval > 0 {
-                        let last_time = started.last_caps_time.lock().unwrap();
-                        if let Some(last) = *last_time
-                            && last.elapsed().as_secs() >= caps_interval as u64
-                        {
-                            should_send = true;
-                            drop(last_time);
-                            *started.last_caps_time.lock().unwrap() =
-                                Some(std::time::Instant::now());
-                        }
-                    }
-                }
-
-                if should_send {
-                    MetadataBuilder::new().caps(&caps).build()
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Process each buffer in the list
+        // Process each buffer in the list through the same encode path as render(),
+        // so batched buffers get identical compression and buffer-timing metadata.
         for buffer in list.iter() {
-            // Get buffer data
             let b = buffer.map_readable().map_err(|_| {
                 gst::element_imp_error!(
                     self,
@@ -1333,51 +1437,48 @@ impl BaseSinkImpl for ZenohSink {
                 gst::FlowError::Error
             })?;
 
-            // Send buffer with caps attachment
-            let put_builder = started.ready.publisher.put(b.as_slice());
-            let result = if let Some(ref attachment) = caps_attachment {
-                put_builder.attachment(attachment.clone()).wait()
-            } else {
-                put_builder.wait()
-            };
-
-            match result {
-                Ok(_) => {
-                    total_bytes += b.len() as u64;
+            let caps_for_this = caps_to_send.take();
+            match self.encode_and_publish(
+                b.as_slice(),
+                buffer,
+                caps_for_this.as_ref(),
+                send_buffer_meta,
+                &publish_tx,
+                &stats,
+                publish_timeout_ms,
+            ) {
+                PublishOutcome::Ok => {
                     total_messages += 1;
                 }
-                Err(e) => {
+                PublishOutcome::Flushing => {
+                    gst::debug!(CAT, imp = self, "Buffer list publish abandoned: flushing");
+                    return Err(gst::FlowError::Flushing);
+                }
+                PublishOutcome::Failed(e) => {
                     errors_count += 1;
-
-                    // Get key expression for error reporting
-                    let key_expr = self.settings.lock().unwrap().key_expr.clone();
-                    let error_msg = format!("{}", e);
-                    let err = ZenohError::Publish {
-                        key_expr,
-                        source: e,
-                    };
-
-                    if error_msg.contains("timeout")
-                        || error_msg.contains("connection")
-                        || error_msg.contains("network")
-                    {
-                        gst::warning!(CAT, imp = self, "Network error in buffer list: {}", err);
-                    } else {
-                        gst::warning!(CAT, imp = self, "Error publishing buffer in list: {}", err);
-                    }
-
-                    // Continue processing remaining buffers instead of failing immediately
-                    // This provides better resilience for batch operations
+                    stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                    gst::warning!(CAT, imp = self, "Error publishing buffer in list: {}", e);
+                    // Continue processing remaining buffers instead of failing immediately.
+                }
+                PublishOutcome::TimedOut => {
+                    errors_count += 1;
+                    stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                    gst::warning!(
+                        CAT,
+                        imp = self,
+                        "Publish in buffer list timed out after {} ms",
+                        publish_timeout_ms
+                    );
+                }
+                PublishOutcome::WorkerGone => {
+                    gst::element_imp_error!(
+                        self,
+                        gst::CoreError::Failed,
+                        ["Publish worker thread is not available"]
+                    );
+                    return Err(gst::FlowError::Error);
                 }
             }
-        }
-
-        // Update statistics in a single operation for better performance
-        {
-            let mut stats = started.stats.lock().unwrap();
-            stats.bytes_sent += total_bytes;
-            stats.messages_sent += total_messages;
-            stats.errors += errors_count;
         }
 
         if errors_count > 0 {
@@ -1454,6 +1555,27 @@ impl BaseSinkImpl for ZenohSink {
         Ok(())
     }
 
+    fn unlock(&self) -> Result<(), gst::ErrorMessage> {
+        gst::debug!(
+            CAT,
+            imp = self,
+            "Unlock called - cancelling any pending publish"
+        );
+        // Set lock-free so an in-flight render() abandons its publish wait promptly.
+        self.unlocked.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn unlock_stop(&self) -> Result<(), gst::ErrorMessage> {
+        gst::debug!(
+            CAT,
+            imp = self,
+            "Unlock stop called - resuming normal operation"
+        );
+        self.unlocked.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
     fn event(&self, event: gst::Event) -> bool {
         use gst::EventView;
 
@@ -1464,12 +1586,14 @@ impl BaseSinkImpl for ZenohSink {
                 self.parent_event(event)
             }
             EventView::FlushStart(_) => {
-                gst::debug!(CAT, imp = self, "Flush start");
-                // Could abort any pending publish operations if needed
+                gst::debug!(CAT, imp = self, "Flush start - cancelling pending publish");
+                // Abort any in-flight publish without touching the state lock.
+                self.unlocked.store(true, Ordering::SeqCst);
                 self.parent_event(event)
             }
             EventView::FlushStop(_) => {
                 gst::debug!(CAT, imp = self, "Flush stop - ready for new data");
+                self.unlocked.store(false, Ordering::SeqCst);
                 self.parent_event(event)
             }
             _ => {

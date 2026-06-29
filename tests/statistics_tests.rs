@@ -17,12 +17,10 @@ fn test_zenohsink_statistics_initial_values() {
     let bytes_sent: u64 = sink.property("bytes-sent");
     let messages_sent: u64 = sink.property("messages-sent");
     let errors: u64 = sink.property("errors");
-    let dropped: u64 = sink.property("dropped");
 
     assert_eq!(bytes_sent, 0, "Initial bytes-sent should be 0");
     assert_eq!(messages_sent, 0, "Initial messages-sent should be 0");
     assert_eq!(errors, 0, "Initial errors should be 0");
-    assert_eq!(dropped, 0, "Initial dropped should be 0");
 }
 
 #[test]
@@ -91,20 +89,18 @@ fn test_zenohsrc_statistics_read_only() {
     );
 }
 
-// This test is commented out because it can hang in some environments
-// TODO: Re-enable with proper timeout handling
-/*
+// Re-enabled after the concurrency fix (Epic #2): `render()`/`create()` no longer
+// hold the `state` lock across blocking Zenoh I/O, so statistics are readable while
+// data is flowing and the NULL transition is bounded (publish-timeout-ms) and never
+// hangs.
 #[test]
 #[serial]
 fn test_statistics_integration() {
     init();
 
-    // Create a simple pipeline with zenohsink and zenohsrc
-    let _pipeline = gst::Pipeline::new();
-
     // Create source element
     let videotestsrc = gst::ElementFactory::make("videotestsrc")
-        .property("num-buffers", 10i32)
+        .property("num-buffers", 30i32)
         .property("is-live", false)
         .build()
         .expect("Failed to create videotestsrc");
@@ -138,47 +134,42 @@ fn test_statistics_integration() {
     receiver_pipeline.add_many([&zenohsrc, &fakesink]).unwrap();
     zenohsrc.link(&fakesink).unwrap();
 
-    // Start both pipelines
-    sender_pipeline.set_state(gst::State::Playing).unwrap();
+    // Start the receiver first so it is subscribed before the sender publishes.
     receiver_pipeline.set_state(gst::State::Playing).unwrap();
+    sender_pipeline.set_state(gst::State::Playing).unwrap();
 
-    // Wait for a bit to let data flow
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Poll the stats (robust under parallel test load) — they must be readable
+    // *during* active traffic (Epic #2 acceptance), proving the state lock is not
+    // held across the publish/receive I/O.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut messages_sent: u64 = 0;
+    let mut messages_received: u64 = 0;
+    while std::time::Instant::now() < deadline {
+        messages_sent = zenohsink.property("messages-sent");
+        messages_received = zenohsrc.property("messages-received");
+        if messages_sent > 0 && messages_received > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 
-    // Check sender statistics
     let bytes_sent: u64 = zenohsink.property("bytes-sent");
-    let messages_sent: u64 = zenohsink.property("messages-sent");
+    let bytes_received: u64 = zenohsrc.property("bytes-received");
+    println!("Sender - Bytes sent: {bytes_sent}, Messages sent: {messages_sent}");
+    println!("Receiver - Bytes received: {bytes_received}, Messages received: {messages_received}");
 
-    println!(
-        "Sender - Bytes sent: {}, Messages sent: {}",
-        bytes_sent, messages_sent
-    );
-
-    // We should have sent some data
     assert!(messages_sent > 0, "Should have sent at least one message");
     assert!(bytes_sent > 0, "Should have sent some bytes");
-
-    // Check receiver statistics
-    let bytes_received: u64 = zenohsrc.property("bytes-received");
-    let messages_received: u64 = zenohsrc.property("messages-received");
-
-    println!(
-        "Receiver - Bytes received: {}, Messages received: {}",
-        bytes_received, messages_received
-    );
-
-    // We should have received some data
     assert!(
         messages_received > 0,
         "Should have received at least one message"
     );
     assert!(bytes_received > 0, "Should have received some bytes");
 
-    // Stop pipelines
+    // Tearing down must not hang (Epic #2 acceptance).
     sender_pipeline.set_state(gst::State::Null).unwrap();
     receiver_pipeline.set_state(gst::State::Null).unwrap();
 }
-*/
 
 #[test]
 #[serial]
@@ -219,7 +210,7 @@ fn test_statistics_properties_exist() {
         .expect("Failed to create zenohsrc");
 
     // Verify all statistics properties exist and are readable
-    let sink_props = ["bytes-sent", "messages-sent", "errors", "dropped"];
+    let sink_props = ["bytes-sent", "messages-sent", "errors"];
     for prop in &sink_props {
         let value: u64 = sink.property(prop);
         println!("zenohsink.{} = {}", prop, value);
@@ -270,11 +261,9 @@ fn test_statistics_types() {
     let bytes_sent: u64 = sink.property("bytes-sent");
     let messages_sent: u64 = sink.property("messages-sent");
     let errors: u64 = sink.property("errors");
-    let dropped: u64 = sink.property("dropped");
 
     // Type checking is done at compile time, so if we get here, types are correct
     assert_eq!(bytes_sent, 0);
     assert_eq!(messages_sent, 0);
     assert_eq!(errors, 0);
-    assert_eq!(dropped, 0);
 }

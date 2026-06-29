@@ -84,15 +84,45 @@ pub enum CompressionError {
     InvalidLevel(i32),
 }
 
-/// Compress data using the specified algorithm and level
+/// Self-describing frame for compressed payloads.
+///
+/// Layout: `MAGIC(3) | algo(1) | version(1) | compressed-bytes...`
+///
+/// The magic + algo + version header makes a compressed payload recognizable on
+/// the wire regardless of the receiver's feature set, so a receiver that lacks
+/// the matching decoder produces a clear error instead of forwarding garbage.
+/// Uncompressed (`None`) payloads carry **no** frame (zero overhead).
+const FRAME_MAGIC: &[u8; 3] = b"GZC";
+const FRAME_VERSION: u8 = 1;
+const FRAME_HEADER_LEN: usize = 5;
+
+const ALGO_ZSTD: u8 = 1;
+const ALGO_LZ4: u8 = 2;
+const ALGO_GZIP: u8 = 3;
+
+/// Map a (compressing) algorithm to its on-wire frame byte.
+fn algo_to_byte(compression_type: CompressionType) -> u8 {
+    match compression_type {
+        CompressionType::None => 0,
+        #[cfg(feature = "compression-zstd")]
+        CompressionType::Zstd => ALGO_ZSTD,
+        #[cfg(feature = "compression-lz4")]
+        CompressionType::Lz4 => ALGO_LZ4,
+        #[cfg(feature = "compression-gzip")]
+        CompressionType::Gzip => ALGO_GZIP,
+    }
+}
+
+/// Compress data using the specified algorithm and level, wrapping the result in
+/// a self-describing frame.
 ///
 /// # Arguments
 /// * `data` - Input data to compress
 /// * `compression_type` - Compression algorithm to use
-/// * `level` - Compression level (1-9, algorithm-specific interpretation)
+/// * `level` - Compression level (1-9, higher = better compression)
 ///
 /// # Returns
-/// Compressed data or error
+/// Framed compressed data, or the raw data unchanged for `None`.
 pub fn compress(
     data: &[u8],
     compression_type: CompressionType,
@@ -102,26 +132,30 @@ pub fn compress(
         return Err(CompressionError::InvalidLevel(level));
     }
 
-    match compression_type {
-        CompressionType::None => Ok(data.to_vec()),
+    // No compression: return the data unframed so the zero-copy path is preserved.
+    if compression_type == CompressionType::None {
+        return Ok(data.to_vec());
+    }
+
+    let payload = match compression_type {
+        CompressionType::None => unreachable!(),
 
         #[cfg(feature = "compression-zstd")]
         CompressionType::Zstd => zstd::encode_all(data, level)
-            .map_err(|e| CompressionError::CompressionFailed(e.to_string())),
+            .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?,
 
         #[cfg(feature = "compression-lz4")]
         CompressionType::Lz4 => {
-            // LZ4 doesn't have traditional levels 1-9, but we map them to acceleration
-            // Higher acceleration = faster but less compression
-            // Level 1 = high compression (acceleration 1)
-            // Level 9 = fast compression (acceleration 9)
-            let acceleration = level;
+            // Use LZ4 high-compression mode so a higher `level` means *better*
+            // compression (matching the documented semantics), and `prepend_size`
+            // so the decompressor learns the size from the block itself — removing
+            // the old hardcoded 16 MB decompression ceiling.
             lz4::block::compress(
                 data,
-                Some(lz4::block::CompressionMode::FAST(acceleration)),
-                false,
+                Some(lz4::block::CompressionMode::HIGHCOMPRESSION(level)),
+                true,
             )
-            .map_err(|e| CompressionError::CompressionFailed(e.to_string()))
+            .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?
         }
 
         #[cfg(feature = "compression-gzip")]
@@ -136,72 +170,110 @@ pub fn compress(
                 .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
             encoder
                 .finish()
-                .map_err(|e| CompressionError::CompressionFailed(e.to_string()))
+                .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?
         }
+    };
 
-        #[cfg(not(any(
-            feature = "compression-zstd",
-            feature = "compression-lz4",
-            feature = "compression-gzip"
-        )))]
-        _ => Err(CompressionError::UnsupportedType(format!(
-            "{:?}",
-            compression_type
+    let mut framed = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
+    framed.extend_from_slice(FRAME_MAGIC);
+    framed.push(algo_to_byte(compression_type));
+    framed.push(FRAME_VERSION);
+    framed.extend_from_slice(&payload);
+    Ok(framed)
+}
+
+/// Decompress a framed payload produced by [`compress`].
+///
+/// `declared_type` is the algorithm advertised in the message metadata. For
+/// `None` the data is returned unchanged; otherwise the self-describing frame is
+/// validated (magic + version) and dispatched by the algorithm byte it carries,
+/// so a mismatched/corrupt payload or a missing decoder fails with a clear error
+/// rather than forwarding garbage downstream.
+pub fn decompress(
+    data: &[u8],
+    declared_type: CompressionType,
+) -> Result<Vec<u8>, CompressionError> {
+    if declared_type == CompressionType::None {
+        return Ok(data.to_vec());
+    }
+
+    if data.len() < FRAME_HEADER_LEN || &data[0..3] != FRAME_MAGIC {
+        return Err(CompressionError::DecompressionFailed(
+            "compressed payload is missing the expected frame header".to_string(),
+        ));
+    }
+    let algo = data[3];
+    let version = data[4];
+    if version != FRAME_VERSION {
+        return Err(CompressionError::DecompressionFailed(format!(
+            "unsupported compression frame version {version}"
+        )));
+    }
+    let payload = &data[FRAME_HEADER_LEN..];
+
+    match algo {
+        ALGO_ZSTD => decompress_zstd(payload),
+        ALGO_LZ4 => decompress_lz4(payload),
+        ALGO_GZIP => decompress_gzip(payload),
+        other => Err(CompressionError::UnsupportedType(format!(
+            "unknown compression algorithm byte {other}"
         ))),
     }
 }
 
-/// Decompress data using the specified algorithm
-///
-/// # Arguments
-/// * `data` - Compressed input data
-/// * `compression_type` - Compression algorithm used
-///
-/// # Returns
-/// Decompressed data or error
-pub fn decompress(
-    data: &[u8],
-    compression_type: CompressionType,
-) -> Result<Vec<u8>, CompressionError> {
-    match compression_type {
-        CompressionType::None => Ok(data.to_vec()),
+fn decompress_zstd(payload: &[u8]) -> Result<Vec<u8>, CompressionError> {
+    #[cfg(feature = "compression-zstd")]
+    {
+        zstd::decode_all(payload).map_err(|e| CompressionError::DecompressionFailed(e.to_string()))
+    }
+    #[cfg(not(feature = "compression-zstd"))]
+    {
+        let _ = payload;
+        Err(CompressionError::UnsupportedType(
+            "payload is zstd-compressed but the compression-zstd feature is not enabled"
+                .to_string(),
+        ))
+    }
+}
 
-        #[cfg(feature = "compression-zstd")]
-        CompressionType::Zstd => {
-            zstd::decode_all(data).map_err(|e| CompressionError::DecompressionFailed(e.to_string()))
-        }
+fn decompress_lz4(payload: &[u8]) -> Result<Vec<u8>, CompressionError> {
+    #[cfg(feature = "compression-lz4")]
+    {
+        // `None` size hint: the decompressed size is read from the block's own
+        // prepended length header (no 16 MB ceiling).
+        lz4::block::decompress(payload, None)
+            .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))
+    }
+    #[cfg(not(feature = "compression-lz4"))]
+    {
+        let _ = payload;
+        Err(CompressionError::UnsupportedType(
+            "payload is lz4-compressed but the compression-lz4 feature is not enabled".to_string(),
+        ))
+    }
+}
 
-        #[cfg(feature = "compression-lz4")]
-        CompressionType::Lz4 => {
-            // LZ4 needs to know the decompressed size, but we don't store it
-            // We'll use a reasonable max size (16MB) for decompression
-            const MAX_DECOMPRESSED_SIZE: i32 = 16 * 1024 * 1024;
-            lz4::block::decompress(data, Some(MAX_DECOMPRESSED_SIZE))
-                .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))
-        }
+fn decompress_gzip(payload: &[u8]) -> Result<Vec<u8>, CompressionError> {
+    #[cfg(feature = "compression-gzip")]
+    {
+        use std::io::Read;
 
-        #[cfg(feature = "compression-gzip")]
-        CompressionType::Gzip => {
-            use flate2::read::GzDecoder;
-            use std::io::Read;
+        use flate2::read::GzDecoder;
 
-            let mut decoder = GzDecoder::new(data);
-            let mut decompressed = Vec::new();
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
-            Ok(decompressed)
-        }
-
-        #[cfg(not(any(
-            feature = "compression-zstd",
-            feature = "compression-lz4",
-            feature = "compression-gzip"
-        )))]
-        _ => Err(CompressionError::UnsupportedType(format!(
-            "{:?}",
-            compression_type
-        ))),
+        let mut decoder = GzDecoder::new(payload);
+        let mut decompressed = Vec::new();
+        decoder
+            .read_to_end(&mut decompressed)
+            .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
+        Ok(decompressed)
+    }
+    #[cfg(not(feature = "compression-gzip"))]
+    {
+        let _ = payload;
+        Err(CompressionError::UnsupportedType(
+            "payload is gzip-compressed but the compression-gzip feature is not enabled"
+                .to_string(),
+        ))
     }
 }
 
@@ -267,10 +339,11 @@ mod tests {
     #[cfg(feature = "compression-zstd")]
     #[test]
     fn test_zstd_compression() {
-        let data = b"This is a test string that should compress well with repeated patterns repeated patterns";
-        let compressed = compress(data, CompressionType::Zstd, 5).unwrap();
+        // Repeated payload so compression beats the small frame header overhead.
+        let data = b"This is a test string that should compress well with repeated patterns repeated patterns".repeat(8);
+        let compressed = compress(&data, CompressionType::Zstd, 5).unwrap();
 
-        // Compressed data should be smaller (for this specific test data)
+        // Compressed (framed) data should still be smaller than the input.
         assert!(compressed.len() < data.len());
 
         let decompressed = decompress(&compressed, CompressionType::Zstd).unwrap();
@@ -290,10 +363,11 @@ mod tests {
     #[cfg(feature = "compression-gzip")]
     #[test]
     fn test_gzip_compression() {
-        let data = b"This is a test string that should compress well with repeated patterns repeated patterns";
-        let compressed = compress(data, CompressionType::Gzip, 5).unwrap();
+        // Repeated payload so compression beats the small frame header overhead.
+        let data = b"This is a test string that should compress well with repeated patterns repeated patterns".repeat(8);
+        let compressed = compress(&data, CompressionType::Gzip, 5).unwrap();
 
-        // Compressed data should be smaller
+        // Compressed (framed) data should still be smaller than the input.
         assert!(compressed.len() < data.len());
 
         let decompressed = decompress(&compressed, CompressionType::Gzip).unwrap();
@@ -314,5 +388,65 @@ mod tests {
 
         // Higher compression level should generally produce smaller output
         // (not guaranteed for small data, but likely for this test)
+    }
+
+    /// A frame decompressing to >16 MB must round-trip (the old LZ4 path had a
+    /// hardcoded 16 MB decompression ceiling).
+    #[cfg(feature = "compression-lz4")]
+    #[test]
+    fn test_lz4_large_frame_over_16mb_roundtrips() {
+        // 20 MB of highly-compressible data.
+        let size = 20 * 1024 * 1024;
+        let mut data = Vec::with_capacity(size);
+        let pattern = b"gst-plugin-zenoh-lz4-large-frame-";
+        while data.len() < size {
+            data.extend_from_slice(pattern);
+        }
+        data.truncate(size);
+
+        let compressed = compress(&data, CompressionType::Lz4, 5).unwrap();
+        let decompressed = decompress(&compressed, CompressionType::Lz4).unwrap();
+        assert_eq!(decompressed.len(), data.len());
+        assert_eq!(decompressed, data);
+    }
+
+    /// Higher LZ4 level must not produce *larger* output (level semantics were
+    /// previously inverted).
+    #[cfg(feature = "compression-lz4")]
+    #[test]
+    fn test_lz4_higher_level_not_worse() {
+        let mut data = Vec::new();
+        for _ in 0..4096 {
+            data.extend_from_slice(b"repeating compressible payload ");
+        }
+        let low = compress(&data, CompressionType::Lz4, 1).unwrap();
+        let high = compress(&data, CompressionType::Lz4, 9).unwrap();
+        assert!(
+            high.len() <= low.len(),
+            "level 9 ({}) should be <= level 1 ({})",
+            high.len(),
+            low.len()
+        );
+        assert_eq!(decompress(&high, CompressionType::Lz4).unwrap(), data);
+    }
+
+    /// Decompressing a payload that is not a valid frame must error clearly
+    /// rather than producing garbage.
+    #[cfg(feature = "compression-zstd")]
+    #[test]
+    fn test_decompress_rejects_unframed_payload() {
+        let not_a_frame = b"this is plainly not a compression frame";
+        let err = decompress(not_a_frame, CompressionType::Zstd);
+        assert!(err.is_err(), "unframed payload must be rejected");
+    }
+
+    /// A frame carries its own algorithm; `compress` output begins with the magic.
+    #[cfg(feature = "compression-zstd")]
+    #[test]
+    fn test_frame_has_magic_header() {
+        let framed = compress(b"some data to compress here", CompressionType::Zstd, 5).unwrap();
+        assert_eq!(&framed[0..3], FRAME_MAGIC);
+        assert_eq!(framed[3], ALGO_ZSTD);
+        assert_eq!(framed[4], FRAME_VERSION);
     }
 }
