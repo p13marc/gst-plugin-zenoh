@@ -57,14 +57,29 @@ and crates.io publishing.
 - CI now runs a feature matrix (default + each `compression-*` + `compression`), so
   the compression tests actually run, plus `clippy -D warnings`, `cargo fmt --check`,
   a release-mode test run, an MSRV job, and `cargo-deny`/`cargo-audit`.
-- Declared MSRV corrected to **1.88** (the crate uses stabilized `let` chains).
 - Release workflow gained a tag-triggered `cargo publish` job and builds **x86_64
   and arm64** `.deb`/`.rpm`/tarball packages; the Fedora RPM suffix is derived from
   the container instead of being hardcoded.
+- Added a `cargo-machete` CI gate for unused dependencies.
+
+### Dependencies & toolchain (Epic #6)
+- Bumped `gstreamer`/`gstreamer-base` (and dev `gstreamer-app`/`gstreamer-check`)
+  `0.24` → **`0.25`** (no source changes required).
+- Pinned `zenoh` from floating `"1.0"` (was resolving to 1.7.2) to **`=1.9.0`** for
+  ABI safety — this is a `cdylib` plugin that shares a process with other Zenoh
+  consumers and must load a matching ABI.
+- Added `zenoh-ext = "=1.9.0"` (staged for Epic #8, ABI-aligned with `zenoh`).
+- Raised MSRV to **1.96** (required by gstreamer 0.25; pinned toolchain for 0.5.0).
+- Removed unused dependencies `futures` and `zenoh-config`.
 
 ### Changed
 - **Wire-format note:** the compression payload format changed (self-describing
   frame). 0.4.0 was never published, so this affects no released build.
+
+### Known follow-ups
+- The informational-only `zenohsrc` QoS properties (`priority`,
+  `congestion-control`, `reliability`) have no effect on the subscribe path and
+  are slated for removal in a dedicated change (Epic #6, §4.8).
 
 ## [0.4.0] - 2026-02-19
 

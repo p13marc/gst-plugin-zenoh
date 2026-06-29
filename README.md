@@ -223,7 +223,7 @@ where `router.json5` contains `{ mode: "client", connect: { endpoints: ["tcp/ROU
 
 ## Requirements
 
-- Rust 1.88+ (edition 2024)
+- Rust 1.96+ (edition 2024)
 - GStreamer 1.20+
 
 ## License
