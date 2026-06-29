@@ -77,10 +77,12 @@ fn test_zenohdemux_statistics_initial_values() {
     let bytes_received: u64 = demux.property("bytes-received");
     let messages_received: u64 = demux.property("messages-received");
     let pads_created: u64 = demux.property("pads-created");
+    let errors: u64 = demux.property("errors");
 
     assert_eq!(bytes_received, 0);
     assert_eq!(messages_received, 0);
     assert_eq!(pads_created, 0);
+    assert_eq!(errors, 0);
 }
 
 #[test]

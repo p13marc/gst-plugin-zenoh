@@ -274,6 +274,233 @@ fn test_demux_multiple_streams() {
     );
 }
 
+/// Two *different* key expressions whose `last-segment` pad names collide must
+/// still produce two distinct pads (keyed by full key-expr), never merged onto one.
+#[test]
+#[serial]
+fn test_demux_colliding_pad_names_stay_separate() {
+    init();
+
+    let base_key = unique_key_expr("demux_collide");
+    let key_expr = format!("{}/**", base_key);
+    // Both end in "front" -> same last-segment base name -> must be disambiguated.
+    let key1 = format!("{}/cameraA/front", base_key);
+    let key2 = format!("{}/cameraB/front", base_key);
+    let session_group = format!("test_collide_{}", std::process::id());
+
+    let pad_names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let pad_names_clone = pad_names.clone();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop1 = stop_flag.clone();
+    let stop2 = stop_flag.clone();
+
+    let recv_pipeline = gst::Pipeline::new();
+    let zenohdemux = gstzenoh::ZenohDemux::builder(&key_expr)
+        .session_group(&session_group)
+        .receive_timeout_ms(50)
+        .pad_naming(gstzenoh::PadNaming::LastSegment)
+        .build();
+    let demux_elem: gst::Element = zenohdemux.clone().upcast();
+    recv_pipeline.add(&demux_elem).unwrap();
+
+    demux_elem.connect_pad_added(move |_, pad: &gst::Pad| {
+        pad_names_clone.lock().unwrap().push(pad.name().to_string());
+        if let Some(parent) = pad.parent_element() {
+            if let Some(pipeline) = parent.parent() {
+                if let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>() {
+                    let fakesink = gst::ElementFactory::make("fakesink")
+                        .property("sync", false)
+                        .property("async", false)
+                        .build()
+                        .unwrap();
+                    pipeline.add(&fakesink).unwrap();
+                    fakesink.sync_state_with_parent().unwrap();
+                    let _ = pad.link(&fakesink.static_pad("sink").unwrap());
+                }
+            }
+        }
+    });
+
+    recv_pipeline.set_state(gst::State::Playing).unwrap();
+    thread::sleep(Duration::from_millis(500));
+
+    let make_sender = |key: &str| {
+        let send_pipeline = gst::Pipeline::new();
+        let appsrc = gst_app::AppSrc::builder()
+            .format(gst::Format::Bytes)
+            .build();
+        let zenohsink = gstzenoh::ZenohSink::builder(key)
+            .session_group(&session_group)
+            .build();
+        let appsrc_elem: gst::Element = appsrc.clone().upcast();
+        let sink_elem: gst::Element = zenohsink.upcast();
+        send_pipeline.add_many([&appsrc_elem, &sink_elem]).unwrap();
+        appsrc_elem.link(&sink_elem).unwrap();
+        send_pipeline.set_state(gst::State::Playing).unwrap();
+        (send_pipeline, appsrc)
+    };
+
+    let (send1, appsrc1) = make_sender(&key1);
+    let (send2, appsrc2) = make_sender(&key2);
+    thread::sleep(Duration::from_millis(100));
+
+    let s1 = thread::spawn(move || {
+        while !stop1.load(Ordering::SeqCst) {
+            if appsrc1
+                .push_buffer(gst::Buffer::with_size(32).unwrap())
+                .is_err()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let s2 = thread::spawn(move || {
+        while !stop2.load(Ordering::SeqCst) {
+            if appsrc2
+                .push_buffer(gst::Buffer::with_size(32).unwrap())
+                .is_err()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+
+    let start = Instant::now();
+    while pad_names.lock().unwrap().len() < 2 && start.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // Read stats while still Started (they reset to 0 on NULL).
+    let created: u64 = demux_elem.property("pads-created");
+    let names: Vec<String> = pad_names.lock().unwrap().clone();
+
+    stop_flag.store(true, Ordering::SeqCst);
+    let _ = send1.set_state(gst::State::Null);
+    let _ = send2.set_state(gst::State::Null);
+    s1.join().unwrap();
+    s2.join().unwrap();
+    stop_pipeline_with_timeout(&recv_pipeline, Duration::from_secs(2));
+
+    assert_eq!(
+        names.len(),
+        2,
+        "Two distinct key-exprs must create two pads, got: {names:?}"
+    );
+    assert_ne!(
+        names[0], names[1],
+        "Colliding pad names must be disambiguated"
+    );
+    assert_eq!(created, 2, "pads-created should be 2");
+}
+
+/// Demux stop() must push EOS to its dynamic pads so downstream shuts down cleanly.
+#[test]
+#[serial]
+fn test_demux_pushes_eos_on_stop() {
+    init();
+
+    let base_key = unique_key_expr("demux_eos");
+    let key_expr = format!("{}/*", base_key);
+    let specific_key = format!("{}/stream1", base_key);
+    let session_group = format!("test_eos_{}", std::process::id());
+
+    let got_eos = Arc::new(AtomicBool::new(false));
+    let got_eos_clone = got_eos.clone();
+    let pad_ready = Arc::new(AtomicBool::new(false));
+    let pad_ready_clone = pad_ready.clone();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop_flag.clone();
+
+    let recv_pipeline = gst::Pipeline::new();
+    let zenohdemux = gstzenoh::ZenohDemux::builder(&key_expr)
+        .session_group(&session_group)
+        .receive_timeout_ms(50)
+        .build();
+    let demux_elem: gst::Element = zenohdemux.clone().upcast();
+    recv_pipeline.add(&demux_elem).unwrap();
+
+    demux_elem.connect_pad_added(move |_, pad: &gst::Pad| {
+        // Watch for EOS events travelling downstream out of the demux pad.
+        let got_eos = got_eos_clone.clone();
+        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            if let Some(gst::PadProbeData::Event(ref ev)) = info.data {
+                if ev.type_() == gst::EventType::Eos {
+                    got_eos.store(true, Ordering::SeqCst);
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
+        if let Some(parent) = pad.parent_element() {
+            if let Some(pipeline) = parent.parent() {
+                if let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>() {
+                    let fakesink = gst::ElementFactory::make("fakesink")
+                        .property("sync", false)
+                        .property("async", false)
+                        .build()
+                        .unwrap();
+                    pipeline.add(&fakesink).unwrap();
+                    fakesink.sync_state_with_parent().unwrap();
+                    let _ = pad.link(&fakesink.static_pad("sink").unwrap());
+                }
+            }
+        }
+        pad_ready_clone.store(true, Ordering::SeqCst);
+    });
+
+    recv_pipeline.set_state(gst::State::Playing).unwrap();
+    thread::sleep(Duration::from_millis(500));
+
+    let send_pipeline = gst::Pipeline::new();
+    let appsrc = gst_app::AppSrc::builder()
+        .format(gst::Format::Bytes)
+        .build();
+    let zenohsink = gstzenoh::ZenohSink::builder(&specific_key)
+        .session_group(&session_group)
+        .build();
+    let appsrc_elem: gst::Element = appsrc.clone().upcast();
+    let sink_elem: gst::Element = zenohsink.upcast();
+    send_pipeline.add_many([&appsrc_elem, &sink_elem]).unwrap();
+    appsrc_elem.link(&sink_elem).unwrap();
+    send_pipeline.set_state(gst::State::Playing).unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let appsrc_sender = appsrc.clone();
+    let sender = thread::spawn(move || {
+        while !stop_clone.load(Ordering::SeqCst) {
+            if appsrc_sender
+                .push_buffer(gst::Buffer::with_size(64).unwrap())
+                .is_err()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(30));
+        }
+    });
+
+    let start = Instant::now();
+    while !pad_ready.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        pad_ready.load(Ordering::SeqCst),
+        "Demux pad was not created"
+    );
+
+    // Stopping the demux must emit EOS to the dynamic pad.
+    stop_pipeline_with_timeout(&recv_pipeline, Duration::from_secs(3));
+
+    stop_flag.store(true, Ordering::SeqCst);
+    let _ = send_pipeline.set_state(gst::State::Null);
+    sender.join().unwrap();
+
+    assert!(
+        got_eos.load(Ordering::SeqCst),
+        "Demux should push EOS to dynamic pads on stop"
+    );
+}
+
 /// Test that demux delivers data to the correct pad
 #[test]
 #[serial]

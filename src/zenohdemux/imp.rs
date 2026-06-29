@@ -45,16 +45,19 @@ struct Statistics {
 }
 
 struct Started {
-    // Keep session alive for the duration of the element
+    /// Session source. When `Some`, this element holds a reference to a shared
+    /// session group that must be released on stop; otherwise the owned session
+    /// is dropped directly. Kept alive for the element's lifetime.
     _session: zenoh::Session,
-    // Keep subscriber alive (actual receiving is done in thread with its own subscriber)
-    _subscriber:
-        zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
+    /// Group name to release on stop (only set for shared-group sessions).
+    session_group: Option<String>,
     /// Flag to signal that the element is stopping
     stopping: Arc<AtomicBool>,
     /// Statistics tracking
     stats: Arc<Mutex<Statistics>>,
-    /// Map of key expression -> source pad
+    /// Map of **full key expression** -> source pad. Keyed by the key expression
+    /// (not the derived pad name) so two distinct key-exprs can never be merged
+    /// onto a single pad even if their pad names would collide.
     pads: Arc<Mutex<HashMap<String, gst::Pad>>>,
     /// Receiver thread handle
     thread_handle: Option<std::thread::JoinHandle<()>>,
@@ -78,6 +81,9 @@ struct Settings {
     pad_naming: PadNaming,
     /// Receive timeout in milliseconds
     receive_timeout_ms: u64,
+    /// Quiescence window (ms) after which `no_more_pads()` is emitted so downstream
+    /// auto-pluggers (e.g. decodebin) can finalize. 0 disables emission.
+    no_more_pads_timeout_ms: u64,
     /// Session group name for sharing sessions via property (gst-launch compatible)
     session_group: Option<String>,
 }
@@ -89,6 +95,7 @@ impl Default for Settings {
             config_file: None,
             pad_naming: PadNaming::FullPath,
             receive_timeout_ms: 100,
+            no_more_pads_timeout_ms: 500,
             session_group: None,
         }
     }
@@ -114,13 +121,40 @@ fn key_expr_to_pad_name(key_expr: &str, naming: PadNaming) -> String {
                 .replace(' ', "_")
         }
         PadNaming::Hash => {
-            // Use a hash of the key expression
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            key_expr.hash(&mut hasher);
-            format!("pad_{:x}", hasher.finish() & 0xFFFFFF)
+            // Use a *stable* hash of the key expression. `DefaultHasher` is not
+            // guaranteed stable across Rust versions/platforms, so use FNV-1a with
+            // a full 32-bit width (was truncated to 24 bits) to reduce collisions.
+            format!("pad_{:08x}", fnv1a_32(key_expr.as_bytes()))
         }
+    }
+}
+
+/// FNV-1a 32-bit hash — small, fast, and stable across versions/platforms.
+fn fnv1a_32(data: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for &b in data {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// Pick a pad name based on `base` that does not collide with any pad already in
+/// `existing`. Pad names must be unique within an element, so when two distinct
+/// key expressions derive the same name we disambiguate with a numeric suffix.
+fn unique_pad_name(base: &str, existing: &HashMap<String, gst::Pad>) -> String {
+    let used: std::collections::HashSet<String> =
+        existing.values().map(|p| p.name().to_string()).collect();
+    if !used.contains(base) {
+        return base.to_string();
+    }
+    let mut n = 1u32;
+    loop {
+        let candidate = format!("{base}_{n}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        n += 1;
     }
 }
 
@@ -233,6 +267,11 @@ impl ObjectImpl for ZenohDemux {
                     .minimum(10)
                     .maximum(5000)
                     .build(),
+                glib::ParamSpecUInt64::builder("no-more-pads-timeout-ms")
+                    .nick("No More Pads Timeout")
+                    .blurb("Quiescence window in milliseconds after which no_more_pads() is emitted so downstream auto-pluggers (e.g. decodebin) can finalize (0 = never emit)")
+                    .default_value(500)
+                    .build(),
                 // Session sharing property
                 glib::ParamSpecString::builder("session-group")
                     .nick("Session Group")
@@ -252,6 +291,11 @@ impl ObjectImpl for ZenohDemux {
                 glib::ParamSpecUInt64::builder("pads-created")
                     .nick("Pads Created")
                     .blurb("Number of dynamic pads created")
+                    .read_only()
+                    .build(),
+                glib::ParamSpecUInt64::builder("errors")
+                    .nick("Errors")
+                    .blurb("Total number of errors encountered")
                     .read_only()
                     .build(),
             ]
@@ -278,6 +322,10 @@ impl ObjectImpl for ZenohDemux {
             "receive-timeout-ms" => {
                 settings.receive_timeout_ms = value.get::<u64>().expect("type checked upstream");
             }
+            "no-more-pads-timeout-ms" => {
+                settings.no_more_pads_timeout_ms =
+                    value.get::<u64>().expect("type checked upstream");
+            }
             "session-group" => {
                 settings.session_group = value
                     .get::<Option<String>>()
@@ -295,6 +343,12 @@ impl ObjectImpl for ZenohDemux {
             "config" => self.settings.lock().unwrap().config_file.to_value(),
             "pad-naming" => self.settings.lock().unwrap().pad_naming.to_value(),
             "receive-timeout-ms" => self.settings.lock().unwrap().receive_timeout_ms.to_value(),
+            "no-more-pads-timeout-ms" => self
+                .settings
+                .lock()
+                .unwrap()
+                .no_more_pads_timeout_ms
+                .to_value(),
             "session-group" => self.settings.lock().unwrap().session_group.to_value(),
             "bytes-received" => {
                 let state = self.state.lock().unwrap();
@@ -316,6 +370,14 @@ impl ObjectImpl for ZenohDemux {
                 let state = self.state.lock().unwrap();
                 if let State::Started(ref started) = *state {
                     started.stats.lock().unwrap().pads_created.to_value()
+                } else {
+                    0u64.to_value()
+                }
+            }
+            "errors" => {
+                let state = self.state.lock().unwrap();
+                if let State::Started(ref started) = *state {
+                    started.stats.lock().unwrap().errors.to_value()
                 } else {
                     0u64.to_value()
                 }
@@ -347,6 +409,7 @@ impl ZenohDemux {
         let config_file = settings.config_file.clone();
         let pad_naming = settings.pad_naming;
         let receive_timeout_ms = settings.receive_timeout_ms;
+        let no_more_pads_timeout_ms = settings.no_more_pads_timeout_ms;
         let session_group = settings.session_group.clone();
         drop(settings);
 
@@ -379,14 +442,9 @@ impl ZenohDemux {
             key_expr
         );
 
-        // Create subscriber for the receiver thread
-        let subscriber_for_thread = session
-            .declare_subscriber(&key_expr)
-            .wait()
-            .map_err(|e| ZenohError::Init(e).to_error_message())?;
-
-        // Create another subscriber to keep in state (for potential future use)
-        let subscriber_for_state = session
+        // Single subscriber for the receiver thread. (A previous second subscriber
+        // "for potential future use" doubled inbound traffic and was never read.)
+        let subscriber = session
             .declare_subscriber(&key_expr)
             .wait()
             .map_err(|e| ZenohError::Init(e).to_error_message())?;
@@ -405,18 +463,19 @@ impl ZenohDemux {
         let thread_handle = std::thread::spawn(move || {
             Self::receiver_loop(
                 element,
-                subscriber_for_thread,
+                subscriber,
                 stopping_clone,
                 stats_clone,
                 pads_clone,
                 pad_naming,
                 receive_timeout_ms,
+                no_more_pads_timeout_ms,
             );
         });
 
         *state = State::Started(Started {
             _session: session,
-            _subscriber: subscriber_for_state,
+            session_group,
             stopping,
             stats,
             pads,
@@ -442,19 +501,59 @@ impl ZenohDemux {
                 state = self.state.lock().unwrap();
             }
 
-            // Remove all dynamic pads
-            if let State::Started(ref started) = *state {
+            // Push EOS to each dynamic pad, then remove it, so downstream shuts
+            // down cleanly instead of hanging waiting for end-of-stream.
+            let session_group = if let State::Started(ref started) = *state {
                 let pads = started.pads.lock().unwrap();
-                for (_, pad) in pads.iter() {
+                for pad in pads.values() {
+                    let _ = pad.push_event(gst::event::Eos::new());
                     let _ = self.obj().remove_pad(pad);
                 }
+                started.session_group.clone()
+            } else {
+                None
+            };
+
+            // Release the shared session reference (closes it on the last release).
+            *state = State::Stopped;
+            drop(state);
+            if let Some(group) = session_group {
+                crate::session::release_session(&group);
             }
+            gst::debug!(CAT, imp = self, "ZenohDemux stopped");
+            return;
         }
 
         *state = State::Stopped;
         gst::debug!(CAT, imp = self, "ZenohDemux stopped");
     }
 
+    /// Create, activate and add a dynamic source pad, pushing the mandatory
+    /// stream-start and segment events. Returns an error instead of panicking so
+    /// the receiver thread can surface a GStreamer error and keep running.
+    fn create_src_pad(
+        element: &super::ZenohDemux,
+        pad_name: &str,
+        key_expr: &str,
+    ) -> Result<gst::Pad, glib::BoolError> {
+        let templ = element
+            .pad_template("src_%s")
+            .ok_or_else(|| glib::bool_error!("missing 'src_%s' pad template"))?;
+        let pad = gst::Pad::builder_from_template(&templ)
+            .name(pad_name)
+            .build();
+        pad.set_active(true)?;
+        element.add_pad(&pad)?;
+
+        // Send stream-start + segment events (required before any data).
+        let stream_id = format!("zenohdemux/{pad_name}/{key_expr}");
+        pad.push_event(gst::event::StreamStart::new(&stream_id));
+        let segment = gst::FormattedSegment::<gst::ClockTime>::new();
+        pad.push_event(gst::event::Segment::new(&segment));
+        Ok(pad)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn receiver_loop(
         element: super::ZenohDemux,
         subscriber: zenoh::pubsub::Subscriber<
@@ -465,24 +564,44 @@ impl ZenohDemux {
         pads: Arc<Mutex<HashMap<String, gst::Pad>>>,
         pad_naming: PadNaming,
         receive_timeout_ms: u64,
+        no_more_pads_timeout_ms: u64,
     ) {
         gst::debug!(CAT, "Receiver loop started");
 
+        // Track quiescence so `no_more_pads()` can be emitted once the set of pads
+        // appears stable, letting downstream auto-pluggers (decodebin) finalize.
+        let mut last_pad_added: Option<std::time::Instant> = None;
+        let mut no_more_pads_emitted = false;
+
         while !stopping.load(Ordering::SeqCst) {
+            // Emit no_more_pads() after the configured quiescence window.
+            if !no_more_pads_emitted
+                && no_more_pads_timeout_ms > 0
+                && let Some(t) = last_pad_added
+                && t.elapsed() >= Duration::from_millis(no_more_pads_timeout_ms)
+            {
+                gst::debug!(CAT, "Quiescence reached; emitting no_more_pads()");
+                element.no_more_pads();
+                no_more_pads_emitted = true;
+            }
+
             // Use recv_timeout to remain responsive to stopping signal
             match subscriber.recv_timeout(Duration::from_millis(receive_timeout_ms)) {
                 Ok(Some(sample)) => {
                     // Get the key expression this sample arrived on
                     let sample_key_expr = sample.key_expr().as_str().to_string();
-                    let pad_name = key_expr_to_pad_name(&sample_key_expr, pad_naming);
 
-                    // Get or create the pad for this key expression
+                    // Get or create the pad for this key expression. The map is keyed
+                    // by the *full key expression* so two distinct keys never merge.
                     let pad = {
                         let mut pads_guard = pads.lock().unwrap();
-                        if let Some(pad) = pads_guard.get(&pad_name) {
+                        if let Some(pad) = pads_guard.get(&sample_key_expr) {
                             pad.clone()
                         } else {
-                            // Create a new pad
+                            // Derive a unique pad name (disambiguating any collision
+                            // between two different key-exprs mapping to the same name).
+                            let base_name = key_expr_to_pad_name(&sample_key_expr, pad_naming);
+                            let pad_name = unique_pad_name(&base_name, &pads_guard);
                             gst::debug!(
                                 CAT,
                                 "Creating new pad '{}' for key expression '{}'",
@@ -490,30 +609,43 @@ impl ZenohDemux {
                                 sample_key_expr
                             );
 
-                            let templ = element.pad_template("src_%s").unwrap();
-                            let pad = gst::Pad::builder_from_template(&templ)
-                                .name(pad_name.as_str())
-                                .build();
-
-                            // Activate the pad
-                            pad.set_active(true).unwrap();
-
-                            // Add pad to element
-                            element.add_pad(&pad).unwrap();
-
-                            // Send stream-start event (required before any data)
-                            let stream_id = format!("zenohdemux/{}/{}", pad_name, sample_key_expr);
-                            pad.push_event(gst::event::StreamStart::new(&stream_id));
-
-                            // Send segment event (required before any data)
-                            let segment = gst::FormattedSegment::<gst::ClockTime>::new();
-                            pad.push_event(gst::event::Segment::new(&segment));
-
-                            // Update statistics
-                            stats.lock().unwrap().pads_created += 1;
-
-                            pads_guard.insert(pad_name, pad.clone());
-                            pad
+                            // Create + activate + add the pad, surfacing a GStreamer
+                            // error instead of panicking the receive thread.
+                            match Self::create_src_pad(&element, &pad_name, &sample_key_expr) {
+                                Ok(pad) => {
+                                    stats.lock().unwrap().pads_created += 1;
+                                    pads_guard.insert(sample_key_expr.clone(), pad.clone());
+                                    // A new pad resets the quiescence timer.
+                                    last_pad_added = Some(std::time::Instant::now());
+                                    if no_more_pads_emitted {
+                                        gst::warning!(
+                                            CAT,
+                                            "New key expression '{}' appeared after no_more_pads()",
+                                            sample_key_expr
+                                        );
+                                    }
+                                    pad
+                                }
+                                Err(e) => {
+                                    gst::error!(
+                                        CAT,
+                                        "Failed to create pad for '{}': {}",
+                                        sample_key_expr,
+                                        e
+                                    );
+                                    stats.lock().unwrap().errors += 1;
+                                    gst::element_error!(
+                                        element,
+                                        gst::CoreError::Pad,
+                                        [
+                                            "Failed to create demux pad for '{}': {}",
+                                            sample_key_expr,
+                                            e
+                                        ]
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                     };
 
