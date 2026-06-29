@@ -10,7 +10,7 @@ readme = "README.md"
 keywords = ["gstreamer", "zenoh", "streaming", "multimedia", "pubsub"]
 categories = ["multimedia::video", "network-programming"]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.96"
 exclude = ["/.github", "/examples", "CLAUDE.md"]
 
 [lib]
@@ -19,12 +19,16 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-zenoh = { version = "1.0", features = ["unstable"] }
-zenoh-config = "1.0"
+# Pinned exactly for ABI safety: this is a cdylib plugin that shares a process
+# with other Zenoh consumers, so the loaded zenoh ABI must match exactly.
+zenoh = { version = "=1.9.0", features = ["unstable"] }
+# Staged for Epic #8 (advanced delivery/resilience). Pinned in lockstep with
+# zenoh so that epic starts from an ABI-aligned resolution. Not yet referenced
+# in code — see [package.metadata.cargo-machete].
+zenoh-ext = { version = "=1.9.0", features = ["unstable"] }
 thiserror = "2.0.4"
-gst = { package = "gstreamer", version = "0.24.2" }
-gst-base = { package = "gstreamer-base", version = "0.24.2" }
-futures = "0.3.30"
+gst = { package = "gstreamer", version = "0.25" }
+gst-base = { package = "gstreamer-base", version = "0.25" }
 urlencoding = "2.1"
 flume = "0.11"
 
@@ -36,10 +40,9 @@ flate2 = { version = "1.0", optional = true }
 
 [dev-dependencies]
 anyhow = "1"
-futures = "0.3"
-gst = { package = "gstreamer", version = "0.24.2" }
-gst-app = { package = "gstreamer-app", version = "0.24.2" }
-gst-check = { package = "gstreamer-check", version = "0.24.2" }
+gst = { package = "gstreamer", version = "0.25" }
+gst-app = { package = "gstreamer-app", version = "0.25" }
+gst-check = { package = "gstreamer-check", version = "0.25" }
 serial_test = "3.0"
 
 [build-dependencies]
@@ -54,6 +57,11 @@ compression = ["compression-zstd", "compression-lz4", "compression-gzip"]
 
 [package.metadata.docs.rs]
 all-features = true
+
+# zenoh-ext is intentionally a direct dependency that is not yet referenced in
+# code (staged for Epic #8). Ignore it so the cargo-machete CI gate stays green.
+[package.metadata.cargo-machete]
+ignored = ["zenoh-ext"]
 
 # Debian/Ubuntu packaging configuration (cargo-deb)
 [package.metadata.deb]

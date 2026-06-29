@@ -102,11 +102,11 @@ fn main() -> Result<(), Error> {
                 main_loop_quit.quit();
             }
             MessageView::Element(element_msg) => {
-                if let Some(s) = element_msg.structure() {
-                    if s.name() == "zenoh-matching-changed" {
-                        let has_subs: bool = s.get("has-subscribers").unwrap();
-                        println!("[on-demand] Bus message: has-subscribers={has_subs}");
-                    }
+                if let Some(s) = element_msg.structure()
+                    && s.name() == "zenoh-matching-changed"
+                {
+                    let has_subs: bool = s.get("has-subscribers").unwrap();
+                    println!("[on-demand] Bus message: has-subscribers={has_subs}");
                 }
             }
             _ => (),

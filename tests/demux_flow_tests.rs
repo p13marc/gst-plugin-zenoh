@@ -65,22 +65,21 @@ fn test_demux_creates_pad_on_data() {
         pad_created_clone.store(true, Ordering::SeqCst);
 
         // Create a fakesink and link to the new pad
-        if let Some(parent) = pad.parent_element() {
-            if let Some(pipeline) = parent.parent() {
-                if let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>() {
-                    let fakesink = gst::ElementFactory::make("fakesink")
-                        .property("sync", false)
-                        .property("async", false)
-                        .build()
-                        .unwrap();
+        if let Some(parent) = pad.parent_element()
+            && let Some(pipeline) = parent.parent()
+            && let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>()
+        {
+            let fakesink = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("async", false)
+                .build()
+                .unwrap();
 
-                    pipeline.add(&fakesink).unwrap();
-                    fakesink.sync_state_with_parent().unwrap();
+            pipeline.add(&fakesink).unwrap();
+            fakesink.sync_state_with_parent().unwrap();
 
-                    let sinkpad = fakesink.static_pad("sink").unwrap();
-                    let _ = pad.link(&sinkpad);
-                }
-            }
+            let sinkpad = fakesink.static_pad("sink").unwrap();
+            let _ = pad.link(&sinkpad);
         }
     });
 
@@ -171,22 +170,21 @@ fn test_demux_multiple_streams() {
     demux_elem.connect_pad_added(move |_, pad: &gst::Pad| {
         pads_clone.fetch_add(1, Ordering::SeqCst);
 
-        if let Some(parent) = pad.parent_element() {
-            if let Some(pipeline) = parent.parent() {
-                if let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>() {
-                    let fakesink = gst::ElementFactory::make("fakesink")
-                        .property("sync", false)
-                        .property("async", false)
-                        .build()
-                        .unwrap();
+        if let Some(parent) = pad.parent_element()
+            && let Some(pipeline) = parent.parent()
+            && let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>()
+        {
+            let fakesink = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("async", false)
+                .build()
+                .unwrap();
 
-                    pipeline.add(&fakesink).unwrap();
-                    fakesink.sync_state_with_parent().unwrap();
+            pipeline.add(&fakesink).unwrap();
+            fakesink.sync_state_with_parent().unwrap();
 
-                    let sinkpad = fakesink.static_pad("sink").unwrap();
-                    let _ = pad.link(&sinkpad);
-                }
-            }
+            let sinkpad = fakesink.static_pad("sink").unwrap();
+            let _ = pad.link(&sinkpad);
         }
     });
 
@@ -305,19 +303,18 @@ fn test_demux_colliding_pad_names_stay_separate() {
 
     demux_elem.connect_pad_added(move |_, pad: &gst::Pad| {
         pad_names_clone.lock().unwrap().push(pad.name().to_string());
-        if let Some(parent) = pad.parent_element() {
-            if let Some(pipeline) = parent.parent() {
-                if let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>() {
-                    let fakesink = gst::ElementFactory::make("fakesink")
-                        .property("sync", false)
-                        .property("async", false)
-                        .build()
-                        .unwrap();
-                    pipeline.add(&fakesink).unwrap();
-                    fakesink.sync_state_with_parent().unwrap();
-                    let _ = pad.link(&fakesink.static_pad("sink").unwrap());
-                }
-            }
+        if let Some(parent) = pad.parent_element()
+            && let Some(pipeline) = parent.parent()
+            && let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>()
+        {
+            let fakesink = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("async", false)
+                .build()
+                .unwrap();
+            pipeline.add(&fakesink).unwrap();
+            fakesink.sync_state_with_parent().unwrap();
+            let _ = pad.link(&fakesink.static_pad("sink").unwrap());
         }
     });
 
@@ -425,26 +422,25 @@ fn test_demux_pushes_eos_on_stop() {
         // Watch for EOS events travelling downstream out of the demux pad.
         let got_eos = got_eos_clone.clone();
         pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
-            if let Some(gst::PadProbeData::Event(ref ev)) = info.data {
-                if ev.type_() == gst::EventType::Eos {
-                    got_eos.store(true, Ordering::SeqCst);
-                }
+            if let Some(gst::PadProbeData::Event(ref ev)) = info.data
+                && ev.type_() == gst::EventType::Eos
+            {
+                got_eos.store(true, Ordering::SeqCst);
             }
             gst::PadProbeReturn::Ok
         });
-        if let Some(parent) = pad.parent_element() {
-            if let Some(pipeline) = parent.parent() {
-                if let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>() {
-                    let fakesink = gst::ElementFactory::make("fakesink")
-                        .property("sync", false)
-                        .property("async", false)
-                        .build()
-                        .unwrap();
-                    pipeline.add(&fakesink).unwrap();
-                    fakesink.sync_state_with_parent().unwrap();
-                    let _ = pad.link(&fakesink.static_pad("sink").unwrap());
-                }
-            }
+        if let Some(parent) = pad.parent_element()
+            && let Some(pipeline) = parent.parent()
+            && let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>()
+        {
+            let fakesink = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("async", false)
+                .build()
+                .unwrap();
+            pipeline.add(&fakesink).unwrap();
+            fakesink.sync_state_with_parent().unwrap();
+            let _ = pad.link(&fakesink.static_pad("sink").unwrap());
         }
         pad_ready_clone.store(true, Ordering::SeqCst);
     });
@@ -532,32 +528,31 @@ fn test_demux_data_routing() {
     demux_elem.connect_pad_added(move |_, pad: &gst::Pad| {
         let received = received_clone.clone();
 
-        if let Some(parent) = pad.parent_element() {
-            if let Some(pipeline) = parent.parent() {
-                if let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>() {
-                    let fakesink = gst::ElementFactory::make("fakesink")
-                        .property("sync", false)
-                        .property("async", false)
-                        .build()
-                        .unwrap();
+        if let Some(parent) = pad.parent_element()
+            && let Some(pipeline) = parent.parent()
+            && let Ok(pipeline) = pipeline.downcast::<gst::Pipeline>()
+        {
+            let fakesink = gst::ElementFactory::make("fakesink")
+                .property("sync", false)
+                .property("async", false)
+                .build()
+                .unwrap();
 
-                    pipeline.add(&fakesink).unwrap();
+            pipeline.add(&fakesink).unwrap();
 
-                    // Add probe to capture data
-                    let sinkpad = fakesink.static_pad("sink").unwrap();
-                    sinkpad.add_probe(gst::PadProbeType::BUFFER, move |_, probe_info| {
-                        if let Some(gst::PadProbeData::Buffer(ref buffer)) = probe_info.data {
-                            if let Ok(map) = buffer.map_readable() {
-                                received.lock().unwrap().push(map.to_vec());
-                            }
-                        }
-                        gst::PadProbeReturn::Ok
-                    });
-
-                    fakesink.sync_state_with_parent().unwrap();
-                    let _ = pad.link(&sinkpad);
+            // Add probe to capture data
+            let sinkpad = fakesink.static_pad("sink").unwrap();
+            sinkpad.add_probe(gst::PadProbeType::BUFFER, move |_, probe_info| {
+                if let Some(gst::PadProbeData::Buffer(ref buffer)) = probe_info.data
+                    && let Ok(map) = buffer.map_readable()
+                {
+                    received.lock().unwrap().push(map.to_vec());
                 }
-            }
+                gst::PadProbeReturn::Ok
+            });
+
+            fakesink.sync_state_with_parent().unwrap();
+            let _ = pad.link(&sinkpad);
         }
     });
 

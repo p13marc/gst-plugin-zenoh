@@ -8,9 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Keep this in sync with `rust-version` in Cargo.toml. 1.88 is the floor
-  # because the code uses stabilized `let` chains (stabilized in Rust 1.88).
-  MSRV: "1.88.0"
+  # Keep this in sync with `rust-version` in Cargo.toml. 1.96 is required by the
+  # gstreamer 0.25 bindings (MSRV 1.92) and the pinned toolchain for this release.
+  MSRV: "1.96.0"
 
 jobs:
   # Formatting and lint gates — fast, run first.
@@ -90,7 +90,10 @@ jobs:
 
   # Verify the crate still builds on its declared minimum supported Rust version.
   msrv:
-    name: MSRV (${{ env.MSRV }})
+    # NOTE: a job `name` can't use the `env` context (only github/needs/strategy/
+    # matrix/vars/inputs) — using ${{ env.MSRV }} here is a startup_failure. Keep
+    # this literal in sync with the MSRV env var above and Cargo.toml.
+    name: MSRV (1.96.0)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -129,3 +132,13 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Audit
         run: cargo audit
+
+  machete:
+    name: cargo-machete (unused deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+      - name: Check for unused dependencies
+        run: cargo machete

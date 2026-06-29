@@ -211,12 +211,12 @@ GST_PLUGIN_PATH=target/debug gst-inspect-1.0 zenohsrc
 All elements share these properties:
 - `key-expr` (String, required): Zenoh key expression
 - `config` (String): Path to Zenoh JSON5 config file
+- `session-group` (String): Session group name for sharing sessions across elements
+
+ZenohSink additional (publisher-side QoS — these are NOT on the subscriber elements):
 - `priority` (1-7): Message priority (1=RealTime, 7=Background)
 - `reliability`: `"best-effort"` or `"reliable"`
 - `congestion-control`: `"block"` or `"drop"`
-- `session-group` (String): Session group name for sharing sessions across elements
-
-ZenohSink additional:
 - `express` (bool): Ultra-low latency mode
 - `send-caps` (bool): Transmit GStreamer caps as metadata
 - `caps-interval` (int): Seconds between caps retransmission
@@ -228,14 +228,14 @@ ZenohSink additional:
 - Bus message `zenoh-matching-changed`: Posted with `has-subscribers` field on matching changes
 
 ZenohSrc additional:
-- `receive-timeout-ms` (int): Timeout for receiving samples (default: 1000)
+- `receive-timeout-ms` (int): Timeout for receiving samples in ms, 10-5000 (default: 100)
 - `apply-buffer-meta` (bool): Apply buffer timing from Zenoh attachments
 
 ZenohDemux additional:
 - `pad-naming`: `full-path`, `last-segment`, or `hash`
 - `apply-buffer-meta` (bool): Apply buffer timing from Zenoh attachments
 
-Statistics (read-only): `bytes-sent`/`bytes-received`, `messages-sent`/`messages-received`, `errors`, `dropped`, `pads-created` (demux only)
+Statistics (read-only): `bytes-sent`/`bytes-received`, `messages-sent`/`messages-received`, `errors`, `pads-created` (demux only)
 
 ## Dependencies
 

@@ -19,13 +19,10 @@
 //!   - Supports Zenoh key expression wildcards like "*" and "**"
 //! * `config` - Path to Zenoh configuration file (optional)
 //!   - Allows custom Zenoh network configuration (endpoints, discovery, etc.)
-//! * `priority` - Subscriber priority level (1-7, default: 5)
-//!   - 1=RealTime (highest), 2=InteractiveHigh, 3=InteractiveLow, 4=DataHigh, 5=Data(default), 6=DataLow, 7=Background(lowest)
-//! * `congestion-control` - Congestion control policy (informational, default: "block")
-//!   - Mainly for configuration consistency with zenohsink
-//! * `reliability` - Expected reliability mode (informational, default: "best-effort")
-//!   - Actual reliability is determined by the matching publisher
-//!   - Used for documentation and pipeline validation
+//!
+//! Note: a subscriber does not configure priority/congestion-control/reliability
+//! — those are publisher-side QoS. Reliability is adapted from the publisher
+//! automatically.
 //!
 //! ## Example Pipelines
 //!
@@ -168,40 +165,6 @@ impl ZenohSrc {
         self.set_property("config", config_path);
     }
 
-    /// Sets the subscriber priority level.
-    ///
-    /// Valid values: 1-7
-    /// - 1: RealTime (highest priority)
-    /// - 2: InteractiveHigh
-    /// - 3: InteractiveLow
-    /// - 4: DataHigh
-    /// - 5: Data (default)
-    /// - 6: DataLow
-    /// - 7: Background (lowest priority)
-    pub fn set_priority(&self, priority: u32) {
-        self.set_property("priority", priority);
-    }
-
-    /// Sets the congestion control policy (informational).
-    ///
-    /// - `"block"`: Wait for network congestion to clear (default)
-    /// - `"drop"`: Drop messages during congestion
-    ///
-    /// Note: Actual behavior depends on publisher settings.
-    pub fn set_congestion_control(&self, mode: &str) {
-        self.set_property("congestion-control", mode);
-    }
-
-    /// Sets the expected reliability mode (informational).
-    ///
-    /// - `"best-effort"`: Fire-and-forget delivery (default)
-    /// - `"reliable"`: Acknowledged delivery with retransmission
-    ///
-    /// Note: Actual reliability is determined by the publisher.
-    pub fn set_reliability(&self, mode: &str) {
-        self.set_property("reliability", mode);
-    }
-
     /// Sets the receive timeout in milliseconds.
     ///
     /// Lower values increase responsiveness but use more CPU.
@@ -269,21 +232,6 @@ impl ZenohSrc {
     /// Returns the path to the Zenoh configuration file, if set.
     pub fn config(&self) -> Option<String> {
         self.property("config")
-    }
-
-    /// Returns the current priority level (1-7).
-    pub fn priority(&self) -> u32 {
-        self.property("priority")
-    }
-
-    /// Returns the current congestion control mode.
-    pub fn congestion_control(&self) -> String {
-        self.property("congestion-control")
-    }
-
-    /// Returns the current reliability mode.
-    pub fn reliability(&self) -> String {
-        self.property("reliability")
     }
 
     /// Returns the receive timeout in milliseconds.
@@ -368,9 +316,6 @@ impl TryFrom<gst::Element> for ZenohSrc {
 pub struct ZenohSrcBuilder {
     key_expr: String,
     config: Option<String>,
-    priority: Option<u32>,
-    congestion_control: Option<String>,
-    reliability: Option<String>,
     receive_timeout_ms: Option<u64>,
     apply_buffer_meta: Option<bool>,
     session: Option<zenoh::Session>,
@@ -383,9 +328,6 @@ impl ZenohSrcBuilder {
         Self {
             key_expr: key_expr.to_string(),
             config: None,
-            priority: None,
-            congestion_control: None,
-            reliability: None,
             receive_timeout_ms: None,
             apply_buffer_meta: None,
             session: None,
@@ -396,24 +338,6 @@ impl ZenohSrcBuilder {
     /// Sets the path to a Zenoh configuration file.
     pub fn config(mut self, path: &str) -> Self {
         self.config = Some(path.to_string());
-        self
-    }
-
-    /// Sets the subscriber priority level (1-7).
-    pub fn priority(mut self, priority: u32) -> Self {
-        self.priority = Some(priority);
-        self
-    }
-
-    /// Sets the congestion control policy ("block" or "drop").
-    pub fn congestion_control(mut self, mode: &str) -> Self {
-        self.congestion_control = Some(mode.to_string());
-        self
-    }
-
-    /// Sets the reliability mode ("best-effort" or "reliable").
-    pub fn reliability(mut self, mode: &str) -> Self {
-        self.reliability = Some(mode.to_string());
         self
     }
 
@@ -456,15 +380,6 @@ impl ZenohSrcBuilder {
 
         if let Some(config) = self.config {
             builder = builder.property("config", config);
-        }
-        if let Some(priority) = self.priority {
-            builder = builder.property("priority", priority);
-        }
-        if let Some(cc) = self.congestion_control {
-            builder = builder.property("congestion-control", cc);
-        }
-        if let Some(rel) = self.reliability {
-            builder = builder.property("reliability", rel);
         }
         if let Some(timeout) = self.receive_timeout_ms {
             builder = builder.property("receive-timeout-ms", timeout);
