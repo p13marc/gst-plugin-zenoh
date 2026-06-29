@@ -5,6 +5,18 @@ All notable changes to gst-plugin-zenoh will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`zenohsrc` ring / drop-oldest receive handler** for live sources (#13). New
+  `handler` property (`fifo` default, lossless/unbounded — or `ring`, keep the
+  most-recent `queue-depth` samples and drop the oldest) plus `queue-depth`
+  (1-100000, default 30) and a read-only `dropped` stat counting evictions. The
+  `ring` handler bounds latency build-up for live RTP/MPEG-TS where staleness is
+  worse than loss; the built-in Zenoh ring drops silently, so a small
+  drop-counting handler backs the stat. FIFO remains the default — behavior is
+  unchanged unless `handler=ring` is selected.
+
 ## [0.5.0] - 2026-06-29
 
 The **0.5.0 correctness milestone**: four P0 bug-fix epics plus CI quality gates

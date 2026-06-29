@@ -503,3 +503,91 @@ fn test_statistics_during_data_flow() {
         num_buffers * buffer_size
     );
 }
+
+/// A stalled consumer with the `ring` handler must drop the oldest samples
+/// (bounding latency) and surface the count via the `dropped` stat — whereas the
+/// default `fifo` handler would queue them unbounded. Sender and receiver share
+/// one in-process session, so the flood is delivered synchronously and reliably
+/// overflows the depth-2 ring.
+#[test]
+#[serial]
+fn test_ring_handler_drops_oldest_under_stalled_consumer() {
+    init();
+
+    let key_expr = unique_key_expr("ring-drop");
+    let zenoh_session = zenoh::open(zenoh::Config::default())
+        .wait()
+        .expect("Failed to open Zenoh session");
+
+    // Receiver: ring handler with a tiny depth so a stalled consumer overflows it.
+    let recv_pipeline = gst::Pipeline::new();
+    let zenohsrc = gstzenoh::ZenohSrc::builder(&key_expr)
+        .session(zenoh_session.clone())
+        .receive_timeout_ms(50)
+        .handler("ring")
+        .queue_depth(2)
+        .build();
+    let fakesink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .unwrap();
+    let src_elem: gst::Element = zenohsrc.clone().upcast();
+    recv_pipeline.add_many([&src_elem, &fakesink]).unwrap();
+    src_elem.link(&fakesink).unwrap();
+
+    // Stall the streaming thread on the first buffer so the ring fills from the
+    // (independent) Zenoh callback thread and starts dropping the oldest.
+    let release = Arc::new(AtomicBool::new(false));
+    let release_probe = release.clone();
+    let srcpad = zenohsrc.static_pad("src").unwrap();
+    srcpad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+        while !release_probe.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        gst::PadProbeReturn::Ok
+    });
+
+    recv_pipeline.set_state(gst::State::Playing).unwrap();
+    thread::sleep(Duration::from_millis(500)); // establish subscription
+
+    // Flood many buffers as fast as possible through a shared session.
+    let send_pipeline = gst::Pipeline::new();
+    let appsrc = gst_app::AppSrc::builder()
+        .format(gst::Format::Bytes)
+        .build();
+    let zenohsink = gstzenoh::ZenohSink::builder(&key_expr)
+        .session(zenoh_session.clone())
+        .build();
+    let appsrc_elem: gst::Element = appsrc.clone().upcast();
+    let sink_elem: gst::Element = zenohsink.clone().upcast();
+    send_pipeline.add_many([&appsrc_elem, &sink_elem]).unwrap();
+    appsrc_elem.link(&sink_elem).unwrap();
+    send_pipeline.set_state(gst::State::Playing).unwrap();
+    thread::sleep(Duration::from_millis(100));
+
+    let num_buffers = 100u64;
+    for i in 0..num_buffers {
+        let mut buffer = gst::Buffer::with_size(16).unwrap();
+        {
+            let buf = buffer.get_mut().unwrap();
+            buf.set_pts(gst::ClockTime::from_mseconds(i));
+        }
+        let _ = appsrc.push_buffer(buffer);
+    }
+    let _ = appsrc.end_of_stream();
+
+    // Let the flood overflow the depth-2 ring while the consumer stalls.
+    thread::sleep(Duration::from_secs(1));
+
+    let dropped = zenohsrc.dropped();
+
+    // Release the consumer and tear everything down.
+    release.store(true, Ordering::SeqCst);
+    let _ = send_pipeline.set_state(gst::State::Null);
+    stop_pipeline_with_timeout(&recv_pipeline, Duration::from_secs(1));
+
+    assert!(
+        dropped > 0,
+        "ring handler under a stalled consumer should have dropped samples, got {dropped}"
+    );
+}

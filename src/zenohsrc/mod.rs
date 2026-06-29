@@ -182,6 +182,23 @@ impl ZenohSrc {
         self.set_property("apply-buffer-meta", apply);
     }
 
+    /// Sets the subscriber receive-handler strategy.
+    ///
+    /// `"fifo"` (default) is lossless and unbounded; `"ring"` keeps only the most
+    /// recent [`queue_depth`](Self::set_queue_depth) samples, dropping the oldest
+    /// to bound latency on live sources. Must be set before the element starts.
+    pub fn set_handler(&self, handler: &str) {
+        self.set_property("handler", handler);
+    }
+
+    /// Sets the ring-handler depth (max samples retained before drop-oldest).
+    ///
+    /// Only affects the `"ring"` handler; ignored for `"fifo"`. Valid range:
+    /// 1-100000, default: 30. Must be set before the element starts.
+    pub fn set_queue_depth(&self, depth: u32) {
+        self.set_property("queue-depth", depth);
+    }
+
     /// Sets a shared Zenoh session for this element.
     ///
     /// This allows multiple elements to share a single Zenoh session,
@@ -244,6 +261,16 @@ impl ZenohSrc {
         self.property("apply-buffer-meta")
     }
 
+    /// Returns the receive-handler strategy (`"fifo"` or `"ring"`).
+    pub fn handler(&self) -> String {
+        self.property("handler")
+    }
+
+    /// Returns the ring-handler depth.
+    pub fn queue_depth(&self) -> u32 {
+        self.property("queue-depth")
+    }
+
     /// Returns the session group name, if set.
     pub fn session_group(&self) -> Option<String> {
         self.property("session-group")
@@ -266,6 +293,11 @@ impl ZenohSrc {
     /// Returns the total number of errors encountered.
     pub fn errors(&self) -> u64 {
         self.property("errors")
+    }
+
+    /// Returns the total samples dropped by the `"ring"` handler (0 for `"fifo"`).
+    pub fn dropped(&self) -> u64 {
+        self.property("dropped")
     }
 }
 
@@ -318,6 +350,8 @@ pub struct ZenohSrcBuilder {
     config: Option<String>,
     receive_timeout_ms: Option<u64>,
     apply_buffer_meta: Option<bool>,
+    handler: Option<String>,
+    queue_depth: Option<u32>,
     session: Option<zenoh::Session>,
     session_group: Option<String>,
 }
@@ -330,6 +364,8 @@ impl ZenohSrcBuilder {
             config: None,
             receive_timeout_ms: None,
             apply_buffer_meta: None,
+            handler: None,
+            queue_depth: None,
             session: None,
             session_group: None,
         }
@@ -350,6 +386,20 @@ impl ZenohSrcBuilder {
     /// Enables or disables applying buffer timing metadata.
     pub fn apply_buffer_meta(mut self, apply: bool) -> Self {
         self.apply_buffer_meta = Some(apply);
+        self
+    }
+
+    /// Sets the receive-handler strategy: `"fifo"` (lossless) or `"ring"`
+    /// (drop-oldest, bounds latency for live sources).
+    pub fn handler(mut self, handler: &str) -> Self {
+        self.handler = Some(handler.to_string());
+        self
+    }
+
+    /// Sets the ring-handler depth (max retained samples before drop-oldest).
+    /// Only affects the `"ring"` handler.
+    pub fn queue_depth(mut self, depth: u32) -> Self {
+        self.queue_depth = Some(depth);
         self
     }
 
@@ -386,6 +436,12 @@ impl ZenohSrcBuilder {
         }
         if let Some(apply) = self.apply_buffer_meta {
             builder = builder.property("apply-buffer-meta", apply);
+        }
+        if let Some(ref handler) = self.handler {
+            builder = builder.property("handler", handler);
+        }
+        if let Some(depth) = self.queue_depth {
+            builder = builder.property("queue-depth", depth);
         }
         if let Some(ref sg) = self.session_group {
             builder = builder.property("session-group", sg);
