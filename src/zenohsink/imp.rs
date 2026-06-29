@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use gst::subclass::prelude::URIHandlerImpl;
 use gst::{glib, prelude::*, subclass::prelude::*};
@@ -41,16 +43,52 @@ struct Statistics {
     bytes_after_compression: u64,
 }
 
+/// Default timeout bounding `zenoh::open(...).wait()` during NULL→READY so an
+/// unreachable router can't stall the state-change thread forever.
+const SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A publish request handed to the background publish worker thread.
+///
+/// The worker owns the Zenoh publisher and performs the (potentially blocking)
+/// `put().wait()` off the GStreamer streaming thread, so `render()` never holds
+/// the `state` lock across network I/O and can be bounded/cancelled.
+struct PublishJob {
+    payload: zenoh::bytes::ZBytes,
+    attachment: Option<zenoh::bytes::ZBytes>,
+    ack: flume::Sender<Result<(), zenoh::Error>>,
+}
+
+/// Outcome of submitting a [`PublishJob`] and awaiting its acknowledgement.
+enum PublishOutcome {
+    /// Publish completed successfully.
+    Ok,
+    /// Zenoh reported a publish error.
+    Failed(zenoh::Error),
+    /// The element was unlocked/flushing while waiting — abandon the publish.
+    Flushing,
+    /// The configured `publish-timeout-ms` elapsed before completion.
+    TimedOut,
+    /// The publish worker thread is gone (channel disconnected).
+    WorkerGone,
+}
+
 /// Zenoh resources created during NULL→READY transition.
 ///
-/// These are lightweight network resources (session + publisher + matching listener)
-/// that allow detecting subscriber presence without consuming pipeline resources.
-/// No data flows until the pipeline reaches PLAYING state.
+/// These are lightweight network resources (session + publish worker + matching
+/// listener) that allow detecting subscriber presence without consuming pipeline
+/// resources. No data flows until the pipeline reaches PLAYING state.
 struct ReadyState {
-    // Keeping session field to maintain ownership and prevent session from being dropped
-    // while publisher is still in use. This can be either owned or shared.
+    /// Channel to the background publish worker that owns the Zenoh publisher.
+    /// Declared before `_session` so it drops first on teardown: dropping the
+    /// sender makes the worker observe a disconnected channel and exit.
+    publish_tx: flume::Sender<PublishJob>,
+    /// Worker thread handle. Detached on drop (we never join, so teardown can't
+    /// hang behind an in-flight block-mode publish); the worker exits on its own
+    /// once `publish_tx` is dropped and any in-flight `put()` returns.
+    _worker: Option<JoinHandle<()>>,
+    // Keeping session field to maintain ownership and prevent session from being
+    // dropped while the worker's publisher is still in use. Owned or shared.
     _session: SessionWrapper,
-    publisher: zenoh::pubsub::Publisher<'static>,
     /// Whether there are currently matching Zenoh subscribers.
     /// Updated via Zenoh's background matching listener callback.
     has_subscribers: Arc<AtomicBool>,
@@ -163,6 +201,9 @@ struct Settings {
     caps_interval: u32,
     /// Send buffer timing metadata (PTS, DTS, duration, flags) with each buffer (default: true)
     send_buffer_meta: bool,
+    /// Maximum time in milliseconds to wait for a single publish to complete before
+    /// giving up (0 = wait indefinitely). Bounds `render()` so shutdown/flush can't hang.
+    publish_timeout_ms: u64,
     /// Compression algorithm to use (requires compression features)
     #[cfg(any(
         feature = "compression-zstd",
@@ -192,9 +233,10 @@ impl Default for Settings {
             congestion_control: "block".into(),
             reliability: "best-effort".into(),
             express: false,
-            send_caps: true,        // Default to sending caps for ease of use
-            caps_interval: 1,       // Send caps every 1 second by default
-            send_buffer_meta: true, // Default to sending buffer timing metadata
+            send_caps: true,          // Default to sending caps for ease of use
+            caps_interval: 1,         // Send caps every 1 second by default
+            send_buffer_meta: true,   // Default to sending buffer timing metadata
+            publish_timeout_ms: 5000, // Bound publishes at 5s by default to avoid shutdown hangs
             #[cfg(any(
                 feature = "compression-zstd",
                 feature = "compression-lz4",
@@ -234,6 +276,9 @@ pub struct ZenohSink {
     settings: Mutex<Settings>,
     /// Current operational state
     state: Mutex<State>,
+    /// Set when the base sink calls `unlock()` (or a flush starts) so an in-flight
+    /// `render()` abandons its publish wait promptly without touching `state`.
+    unlocked: Arc<AtomicBool>,
 }
 
 impl Default for ZenohSink {
@@ -241,6 +286,7 @@ impl Default for ZenohSink {
         Self {
             settings: Mutex::new(Settings::default()),
             state: Mutex::new(State::default()),
+            unlocked: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -297,9 +343,20 @@ impl ZenohSink {
                 }
                 _ => zenoh::Config::default(),
             };
-            let session = zenoh::open(config)
-                .wait()
-                .map_err(|e| ZenohError::Init(e).to_error_message())?;
+            // Bound the open so an unreachable router can't stall the state change.
+            let session = crate::utils::call_with_timeout(SESSION_OPEN_TIMEOUT, move || {
+                zenoh::open(config).wait()
+            })
+            .map_err(|_| {
+                gst::error_msg!(
+                    gst::ResourceError::OpenWrite,
+                    [
+                        "Timed out opening Zenoh session after {:?}",
+                        SESSION_OPEN_TIMEOUT
+                    ]
+                )
+            })?
+            .map_err(|e| ZenohError::Init(e).to_error_message())?;
             SessionWrapper::Owned(session)
         };
 
@@ -414,11 +471,89 @@ impl ZenohSink {
             );
         }
 
+        // Spawn the publish worker that owns the publisher. Performing publishes on a
+        // dedicated thread keeps the blocking `put().wait()` off the streaming thread,
+        // so `render()` never holds the `state` lock across network I/O.
+        let (publish_tx, publish_rx) = flume::unbounded::<PublishJob>();
+        let worker = std::thread::Builder::new()
+            .name("zenohsink-publish".into())
+            .spawn(move || {
+                // `publisher` is moved here and lives for the worker's lifetime, which
+                // also keeps the background matching listener active.
+                while let Ok(job) = publish_rx.recv() {
+                    let PublishJob {
+                        payload,
+                        attachment,
+                        ack,
+                    } = job;
+                    let builder = publisher.put(payload);
+                    let res = match attachment {
+                        Some(att) => builder.attachment(att).wait(),
+                        None => builder.wait(),
+                    };
+                    // Receiver may be gone (render() bailed on timeout/flush); ignore.
+                    let _ = ack.send(res);
+                }
+            })
+            .map_err(|e| {
+                gst::error_msg!(
+                    gst::ResourceError::Failed,
+                    ["Failed to spawn publish worker thread: {}", e]
+                )
+            })?;
+
         Ok(ReadyState {
+            publish_tx,
+            _worker: Some(worker),
             _session: session_wrapper,
-            publisher,
             has_subscribers,
         })
+    }
+
+    /// Submit a publish job to the worker and wait (bounded) for its result.
+    ///
+    /// Returns promptly as [`PublishOutcome::Flushing`] if the element is unlocked
+    /// while waiting, and as [`PublishOutcome::TimedOut`] once `publish_timeout_ms`
+    /// elapses — so the streaming thread can never block indefinitely on a publish.
+    fn submit_publish(
+        &self,
+        publish_tx: &flume::Sender<PublishJob>,
+        payload: zenoh::bytes::ZBytes,
+        attachment: Option<zenoh::bytes::ZBytes>,
+        publish_timeout_ms: u64,
+    ) -> PublishOutcome {
+        let (ack_tx, ack_rx) = flume::bounded(1);
+        if publish_tx
+            .send(PublishJob {
+                payload,
+                attachment,
+                ack: ack_tx,
+            })
+            .is_err()
+        {
+            return PublishOutcome::WorkerGone;
+        }
+
+        let deadline = (publish_timeout_ms > 0)
+            .then(|| Instant::now() + Duration::from_millis(publish_timeout_ms));
+
+        loop {
+            if self.unlocked.load(Ordering::SeqCst) {
+                return PublishOutcome::Flushing;
+            }
+            match ack_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(Ok(())) => return PublishOutcome::Ok,
+                Ok(Err(e)) => return PublishOutcome::Failed(e),
+                Err(flume::RecvTimeoutError::Timeout) => {
+                    if let Some(d) = deadline
+                        && Instant::now() >= d
+                    {
+                        return PublishOutcome::TimedOut;
+                    }
+                }
+                Err(flume::RecvTimeoutError::Disconnected) => return PublishOutcome::WorkerGone,
+            }
+        }
     }
 }
 
@@ -556,6 +691,12 @@ impl ObjectImpl for ZenohSink {
                     .nick("Send Buffer Metadata")
                     .blurb("Send buffer timing metadata (PTS, DTS, duration, offset, flags) with each buffer for proper A/V sync")
                     .default_value(true)
+                    .build(),
+                // Publish timeout property
+                glib::ParamSpecUInt64::builder("publish-timeout-ms")
+                    .nick("Publish Timeout")
+                    .blurb("Maximum time in milliseconds to wait for a single publish to complete before giving up (0 = wait indefinitely). Bounds render() so shutdown/flush cannot hang.")
+                    .default_value(5000)
                     .build(),
                 // Compression properties (conditional on features)
                 #[cfg(any(
@@ -738,6 +879,9 @@ impl ObjectImpl for ZenohSink {
             "send-buffer-meta" => {
                 settings.send_buffer_meta = value.get::<bool>().expect("type checked upstream");
             }
+            "publish-timeout-ms" => {
+                settings.publish_timeout_ms = value.get::<u64>().expect("type checked upstream");
+            }
             #[cfg(any(
                 feature = "compression-zstd",
                 feature = "compression-lz4",
@@ -781,7 +925,8 @@ impl ObjectImpl for ZenohSink {
         match pspec.name() {
             // Configuration properties - read from settings
             "key-expr" | "config" | "priority" | "congestion-control" | "reliability"
-            | "express" | "send-caps" | "caps-interval" | "send-buffer-meta" | "session-group" => {
+            | "express" | "send-caps" | "caps-interval" | "send-buffer-meta"
+            | "publish-timeout-ms" | "session-group" => {
                 let settings = self.settings.lock().unwrap();
                 match pspec.name() {
                     "key-expr" => settings.key_expr.to_value(),
@@ -793,6 +938,7 @@ impl ObjectImpl for ZenohSink {
                     "send-caps" => settings.send_caps.to_value(),
                     "caps-interval" => settings.caps_interval.to_value(),
                     "send-buffer-meta" => settings.send_buffer_meta.to_value(),
+                    "publish-timeout-ms" => settings.publish_timeout_ms.to_value(),
                     "session-group" => settings.session_group.to_value(),
                     _ => unreachable!(),
                 }
@@ -923,6 +1069,9 @@ impl BaseSinkImpl for ZenohSink {
 
         gst::debug!(CAT, "ZenohSink transitioning from Ready to Started");
 
+        // Clear any leftover unlock/flush signal from a previous run.
+        self.unlocked.store(false, Ordering::SeqCst);
+
         // Take the ReadyState and promote it to Started with render-time resources
         let ready_state = match std::mem::replace(&mut *state, State::Starting) {
             State::Ready(ready) => ready,
@@ -942,10 +1091,28 @@ impl BaseSinkImpl for ZenohSink {
     }
 
     fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-        let state_locked = self.state.lock().unwrap();
-        let State::Started(ref started) = *state_locked else {
-            gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
-            return Err(gst::FlowError::Error);
+        // Clone out the render-time resources under a short-lived lock, then release
+        // it before any (blocking) network I/O so stats and state transitions stay
+        // observable during active traffic.
+        let (publish_tx, stats, caps_sent, last_caps, last_caps_time, publish_timeout_ms) = {
+            let state_locked = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let State::Started(ref started) = *state_locked else {
+                gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
+                return Err(gst::FlowError::Error);
+            };
+            let publish_timeout_ms = self
+                .settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .publish_timeout_ms;
+            (
+                started.ready.publish_tx.clone(),
+                started.stats.clone(),
+                started.caps_sent.clone(),
+                started.last_caps.clone(),
+                started.last_caps_time.clone(),
+                publish_timeout_ms,
+            )
         };
 
         // Get buffer data with proper error handling
@@ -1007,7 +1174,7 @@ impl BaseSinkImpl for ZenohSink {
                         "Compression failed: {}, sending uncompressed",
                         e
                     );
-                    started.stats.lock().unwrap().errors += 1;
+                    stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
                     // No copy - borrow the original slice
                     (std::borrow::Cow::Borrowed(b.as_slice()), false)
                 }
@@ -1041,16 +1208,17 @@ impl BaseSinkImpl for ZenohSink {
                 let mut should_send = false;
 
                 // Check if this is the first buffer (always send)
-                if !started.caps_sent.load(Ordering::Acquire) {
+                if !caps_sent.load(Ordering::Acquire) {
                     gst::debug!(CAT, imp = self, "Sending caps on first buffer: {}", caps);
                     should_send = true;
-                    started.caps_sent.store(true, Ordering::Release);
-                    *started.last_caps.lock().unwrap() = Some(caps.clone());
-                    *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
+                    caps_sent.store(true, Ordering::Release);
+                    *last_caps.lock().unwrap_or_else(|e| e.into_inner()) = Some(caps.clone());
+                    *last_caps_time.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(std::time::Instant::now());
                 } else {
                     // Check if caps have changed (always send on change)
-                    let last_caps = started.last_caps.lock().unwrap();
-                    if last_caps.as_ref() != Some(&caps) {
+                    let last_caps_guard = last_caps.lock().unwrap_or_else(|e| e.into_inner());
+                    if last_caps_guard.as_ref() != Some(&caps) {
                         gst::debug!(
                             CAT,
                             imp = self,
@@ -1058,12 +1226,13 @@ impl BaseSinkImpl for ZenohSink {
                             caps
                         );
                         should_send = true;
-                        drop(last_caps);
-                        *started.last_caps.lock().unwrap() = Some(caps.clone());
-                        *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
+                        drop(last_caps_guard);
+                        *last_caps.lock().unwrap_or_else(|e| e.into_inner()) = Some(caps.clone());
+                        *last_caps_time.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(std::time::Instant::now());
                     } else if caps_interval > 0 {
                         // Check if it's time for periodic transmission
-                        let last_time = started.last_caps_time.lock().unwrap();
+                        let last_time = last_caps_time.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(last) = *last_time
                             && last.elapsed().as_secs() >= caps_interval as u64
                         {
@@ -1075,7 +1244,7 @@ impl BaseSinkImpl for ZenohSink {
                             );
                             should_send = true;
                             drop(last_time);
-                            *started.last_caps_time.lock().unwrap() =
+                            *last_caps_time.lock().unwrap_or_else(|e| e.into_inner()) =
                                 Some(std::time::Instant::now());
                         }
                     }
@@ -1188,20 +1357,17 @@ impl BaseSinkImpl for ZenohSink {
             }
         };
 
-        // Send with caps attachment
-        // Note: Zenoh's wait() already handles timeouts internally
-        let put_builder = started.ready.publisher.put(&data_to_send);
-        let result = if let Some(attachment) = attachment {
-            put_builder.attachment(attachment).wait()
-        } else {
-            put_builder.wait()
-        };
+        // Hand the encoded payload to the publish worker (off the streaming thread)
+        // and wait, bounded, for completion — so a stalled publish can't hang here.
+        let payload_bytes = data_to_send.into_owned();
+        let payload_len = payload_bytes.len() as u64;
+        let payload = zenoh::bytes::ZBytes::from(payload_bytes);
 
-        match result {
-            Ok(_) => {
+        match self.submit_publish(&publish_tx, payload, attachment, publish_timeout_ms) {
+            PublishOutcome::Ok => {
                 // Update statistics on success
-                let mut stats = started.stats.lock().unwrap();
-                stats.bytes_sent += data_to_send.len() as u64;
+                let mut stats = stats.lock().unwrap_or_else(|e| e.into_inner());
+                stats.bytes_sent += payload_len;
                 stats.messages_sent += 1;
 
                 #[cfg(any(
@@ -1211,17 +1377,22 @@ impl BaseSinkImpl for ZenohSink {
                 ))]
                 if compressed {
                     stats.bytes_before_compression += original_size as u64;
-                    stats.bytes_after_compression += data_to_send.len() as u64;
+                    stats.bytes_after_compression += payload_len;
                 }
 
                 Ok(gst::FlowSuccess::Ok)
             }
-            Err(e) => {
+            PublishOutcome::Failed(e) => {
                 // Update error statistics
-                started.stats.lock().unwrap().errors += 1;
+                stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
 
                 // Get key expression for better error reporting
-                let key_expr = self.settings.lock().unwrap().key_expr.clone();
+                let key_expr = self
+                    .settings
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .key_expr
+                    .clone();
 
                 // Check if this is a network-related error before consuming e
                 let error_msg = format!("{}", e);
@@ -1244,6 +1415,27 @@ impl BaseSinkImpl for ZenohSink {
                 }
                 Err(err.to_flow_error())
             }
+            PublishOutcome::Flushing => {
+                gst::debug!(CAT, imp = self, "Publish abandoned: element is flushing");
+                Err(gst::FlowError::Flushing)
+            }
+            PublishOutcome::TimedOut => {
+                stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
+                gst::element_imp_error!(
+                    self,
+                    gst::ResourceError::Write,
+                    ["Publish timed out after {} ms", publish_timeout_ms]
+                );
+                Err(gst::FlowError::Error)
+            }
+            PublishOutcome::WorkerGone => {
+                gst::element_imp_error!(
+                    self,
+                    gst::CoreError::Failed,
+                    ["Publish worker thread is not available"]
+                );
+                Err(gst::FlowError::Error)
+            }
         }
     }
 
@@ -1255,10 +1447,27 @@ impl BaseSinkImpl for ZenohSink {
             list.len()
         );
 
-        let state_locked = self.state.lock().unwrap();
-        let State::Started(ref started) = *state_locked else {
-            gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
-            return Err(gst::FlowError::Error);
+        // Clone out render-time resources under a short-lived lock, then release it
+        // before doing any network I/O (mirrors render()).
+        let (publish_tx, stats, caps_sent, last_caps, last_caps_time, publish_timeout_ms) = {
+            let state_locked = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let State::Started(ref started) = *state_locked else {
+                gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
+                return Err(gst::FlowError::Error);
+            };
+            let publish_timeout_ms = self
+                .settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .publish_timeout_ms;
+            (
+                started.ready.publish_tx.clone(),
+                started.stats.clone(),
+                started.caps_sent.clone(),
+                started.last_caps.clone(),
+                started.last_caps_time.clone(),
+                publish_timeout_ms,
+            )
         };
 
         // Track statistics for the batch
@@ -1268,7 +1477,7 @@ impl BaseSinkImpl for ZenohSink {
 
         // Get caps settings
         let (send_caps, caps_interval) = {
-            let settings = self.settings.lock().unwrap();
+            let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
             (settings.send_caps, settings.caps_interval)
         };
 
@@ -1276,7 +1485,7 @@ impl BaseSinkImpl for ZenohSink {
             if let Some(caps) = self.obj().sink_pad().current_caps() {
                 let mut should_send = false;
 
-                if !started.caps_sent.load(Ordering::Acquire) {
+                if !caps_sent.load(Ordering::Acquire) {
                     gst::debug!(
                         CAT,
                         imp = self,
@@ -1284,25 +1493,27 @@ impl BaseSinkImpl for ZenohSink {
                         caps
                     );
                     should_send = true;
-                    started.caps_sent.store(true, Ordering::Release);
-                    *started.last_caps.lock().unwrap() = Some(caps.clone());
-                    *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
+                    caps_sent.store(true, Ordering::Release);
+                    *last_caps.lock().unwrap_or_else(|e| e.into_inner()) = Some(caps.clone());
+                    *last_caps_time.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(std::time::Instant::now());
                 } else {
-                    let last_caps = started.last_caps.lock().unwrap();
-                    if last_caps.as_ref() != Some(&caps) {
+                    let last_caps_guard = last_caps.lock().unwrap_or_else(|e| e.into_inner());
+                    if last_caps_guard.as_ref() != Some(&caps) {
                         gst::debug!(CAT, imp = self, "Caps changed in buffer list: {}", caps);
                         should_send = true;
-                        drop(last_caps);
-                        *started.last_caps.lock().unwrap() = Some(caps.clone());
-                        *started.last_caps_time.lock().unwrap() = Some(std::time::Instant::now());
+                        drop(last_caps_guard);
+                        *last_caps.lock().unwrap_or_else(|e| e.into_inner()) = Some(caps.clone());
+                        *last_caps_time.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(std::time::Instant::now());
                     } else if caps_interval > 0 {
-                        let last_time = started.last_caps_time.lock().unwrap();
+                        let last_time = last_caps_time.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(last) = *last_time
                             && last.elapsed().as_secs() >= caps_interval as u64
                         {
                             should_send = true;
                             drop(last_time);
-                            *started.last_caps_time.lock().unwrap() =
+                            *last_caps_time.lock().unwrap_or_else(|e| e.into_inner()) =
                                 Some(std::time::Instant::now());
                         }
                     }
@@ -1333,48 +1544,61 @@ impl BaseSinkImpl for ZenohSink {
                 gst::FlowError::Error
             })?;
 
-            // Send buffer with caps attachment
-            let put_builder = started.ready.publisher.put(b.as_slice());
-            let result = if let Some(ref attachment) = caps_attachment {
-                put_builder.attachment(attachment.clone()).wait()
-            } else {
-                put_builder.wait()
-            };
-
-            match result {
-                Ok(_) => {
-                    total_bytes += b.len() as u64;
+            // Publish via the worker (off the streaming thread), bounded by the timeout.
+            let payload = zenoh::bytes::ZBytes::from(b.as_slice().to_vec());
+            let payload_len = b.len() as u64;
+            match self.submit_publish(
+                &publish_tx,
+                payload,
+                caps_attachment.clone(),
+                publish_timeout_ms,
+            ) {
+                PublishOutcome::Ok => {
+                    total_bytes += payload_len;
                     total_messages += 1;
                 }
-                Err(e) => {
+                PublishOutcome::Flushing => {
+                    gst::debug!(CAT, imp = self, "Buffer list publish abandoned: flushing");
+                    return Err(gst::FlowError::Flushing);
+                }
+                PublishOutcome::Failed(e) => {
                     errors_count += 1;
-
-                    // Get key expression for error reporting
-                    let key_expr = self.settings.lock().unwrap().key_expr.clone();
-                    let error_msg = format!("{}", e);
+                    let key_expr = self
+                        .settings
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .key_expr
+                        .clone();
                     let err = ZenohError::Publish {
                         key_expr,
                         source: e,
                     };
-
-                    if error_msg.contains("timeout")
-                        || error_msg.contains("connection")
-                        || error_msg.contains("network")
-                    {
-                        gst::warning!(CAT, imp = self, "Network error in buffer list: {}", err);
-                    } else {
-                        gst::warning!(CAT, imp = self, "Error publishing buffer in list: {}", err);
-                    }
-
-                    // Continue processing remaining buffers instead of failing immediately
-                    // This provides better resilience for batch operations
+                    gst::warning!(CAT, imp = self, "Error publishing buffer in list: {}", err);
+                    // Continue processing remaining buffers instead of failing immediately.
+                }
+                PublishOutcome::TimedOut => {
+                    errors_count += 1;
+                    gst::warning!(
+                        CAT,
+                        imp = self,
+                        "Publish in buffer list timed out after {} ms",
+                        publish_timeout_ms
+                    );
+                }
+                PublishOutcome::WorkerGone => {
+                    gst::element_imp_error!(
+                        self,
+                        gst::CoreError::Failed,
+                        ["Publish worker thread is not available"]
+                    );
+                    return Err(gst::FlowError::Error);
                 }
             }
         }
 
         // Update statistics in a single operation for better performance
         {
-            let mut stats = started.stats.lock().unwrap();
+            let mut stats = stats.lock().unwrap_or_else(|e| e.into_inner());
             stats.bytes_sent += total_bytes;
             stats.messages_sent += total_messages;
             stats.errors += errors_count;
@@ -1454,6 +1678,27 @@ impl BaseSinkImpl for ZenohSink {
         Ok(())
     }
 
+    fn unlock(&self) -> Result<(), gst::ErrorMessage> {
+        gst::debug!(
+            CAT,
+            imp = self,
+            "Unlock called - cancelling any pending publish"
+        );
+        // Set lock-free so an in-flight render() abandons its publish wait promptly.
+        self.unlocked.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn unlock_stop(&self) -> Result<(), gst::ErrorMessage> {
+        gst::debug!(
+            CAT,
+            imp = self,
+            "Unlock stop called - resuming normal operation"
+        );
+        self.unlocked.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
     fn event(&self, event: gst::Event) -> bool {
         use gst::EventView;
 
@@ -1464,12 +1709,14 @@ impl BaseSinkImpl for ZenohSink {
                 self.parent_event(event)
             }
             EventView::FlushStart(_) => {
-                gst::debug!(CAT, imp = self, "Flush start");
-                // Could abort any pending publish operations if needed
+                gst::debug!(CAT, imp = self, "Flush start - cancelling pending publish");
+                // Abort any in-flight publish without touching the state lock.
+                self.unlocked.store(true, Ordering::SeqCst);
                 self.parent_event(event)
             }
             EventView::FlushStop(_) => {
                 gst::debug!(CAT, imp = self, "Flush stop - ready for new data");
+                self.unlocked.store(false, Ordering::SeqCst);
                 self.parent_event(event)
             }
             _ => {

@@ -91,20 +91,18 @@ fn test_zenohsrc_statistics_read_only() {
     );
 }
 
-// This test is commented out because it can hang in some environments
-// TODO: Re-enable with proper timeout handling
-/*
+// Re-enabled after the concurrency fix (Epic #2): `render()`/`create()` no longer
+// hold the `state` lock across blocking Zenoh I/O, so statistics are readable while
+// data is flowing and the NULL transition is bounded (publish-timeout-ms) and never
+// hangs.
 #[test]
 #[serial]
 fn test_statistics_integration() {
     init();
 
-    // Create a simple pipeline with zenohsink and zenohsrc
-    let _pipeline = gst::Pipeline::new();
-
     // Create source element
     let videotestsrc = gst::ElementFactory::make("videotestsrc")
-        .property("num-buffers", 10i32)
+        .property("num-buffers", 30i32)
         .property("is-live", false)
         .build()
         .expect("Failed to create videotestsrc");
@@ -138,47 +136,33 @@ fn test_statistics_integration() {
     receiver_pipeline.add_many([&zenohsrc, &fakesink]).unwrap();
     zenohsrc.link(&fakesink).unwrap();
 
-    // Start both pipelines
-    sender_pipeline.set_state(gst::State::Playing).unwrap();
+    // Start the receiver first so it is subscribed before the sender publishes.
     receiver_pipeline.set_state(gst::State::Playing).unwrap();
+    sender_pipeline.set_state(gst::State::Playing).unwrap();
 
-    // Wait for a bit to let data flow
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Wait for data to flow.
+    std::thread::sleep(std::time::Duration::from_millis(800));
 
-    // Check sender statistics
+    // Statistics must be readable *during* active traffic (Epic #2 acceptance).
     let bytes_sent: u64 = zenohsink.property("bytes-sent");
     let messages_sent: u64 = zenohsink.property("messages-sent");
-
-    println!(
-        "Sender - Bytes sent: {}, Messages sent: {}",
-        bytes_sent, messages_sent
-    );
-
-    // We should have sent some data
+    println!("Sender - Bytes sent: {bytes_sent}, Messages sent: {messages_sent}");
     assert!(messages_sent > 0, "Should have sent at least one message");
     assert!(bytes_sent > 0, "Should have sent some bytes");
 
-    // Check receiver statistics
     let bytes_received: u64 = zenohsrc.property("bytes-received");
     let messages_received: u64 = zenohsrc.property("messages-received");
-
-    println!(
-        "Receiver - Bytes received: {}, Messages received: {}",
-        bytes_received, messages_received
-    );
-
-    // We should have received some data
+    println!("Receiver - Bytes received: {bytes_received}, Messages received: {messages_received}");
     assert!(
         messages_received > 0,
         "Should have received at least one message"
     );
     assert!(bytes_received > 0, "Should have received some bytes");
 
-    // Stop pipelines
+    // Tearing down must not hang (Epic #2 acceptance).
     sender_pipeline.set_state(gst::State::Null).unwrap();
     receiver_pipeline.set_state(gst::State::Null).unwrap();
 }
-*/
 
 #[test]
 #[serial]

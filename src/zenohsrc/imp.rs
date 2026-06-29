@@ -18,6 +18,10 @@ static CAT: LazyLock<gst::DebugCategory> = LazyLock::new(|| {
     gst::DebugCategory::new("zenohsrc", gst::DebugColorFlags::empty(), Some("Zenoh Src"))
 });
 
+/// Default timeout bounding `zenoh::open(...).wait()` during start so an unreachable
+/// router can't stall the state-change thread forever.
+const SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Statistics tracking for ZenohSrc
 #[derive(Debug, Clone, Default)]
 struct Statistics {
@@ -30,10 +34,10 @@ struct Started {
     // Keeping session field to maintain ownership and prevent session from being dropped
     // while subscriber is still in use. This can be either owned or shared.
     _session: SessionWrapper,
+    /// Subscriber wrapped in `Arc` so `create()` can clone it out and release the
+    /// `state` lock before the blocking `recv_timeout` poll loop.
     subscriber:
-        zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>,
-    /// Flag to signal that the element is flushing and should cancel blocking operations
-    flushing: Arc<AtomicBool>,
+        Arc<zenoh::pubsub::Subscriber<zenoh::handlers::FifoChannelHandler<zenoh::sample::Sample>>>,
     /// Statistics tracking (shared for thread-safe updates)
     stats: Arc<Mutex<Statistics>>,
 }
@@ -152,6 +156,11 @@ pub struct ZenohSrc {
     settings: Mutex<Settings>,
     /// Current operational state
     state: Mutex<State>,
+    /// Flag to signal that the element is flushing and should cancel blocking
+    /// operations. Stored on `self` (not behind `state`) so `unlock()`, `unlock_stop()`
+    /// and the flush `event()` handlers can set it lock-free without queueing behind
+    /// a `create()` that holds the `state` lock across its poll loop.
+    flushing: Arc<AtomicBool>,
 }
 
 impl ZenohSrc {
@@ -524,9 +533,20 @@ impl BaseSrcImpl for ZenohSrc {
                 }
                 _ => zenoh::Config::default(),
             };
-            let session = zenoh::open(config)
-                .wait()
-                .map_err(|e| ZenohError::Init(e).to_error_message())?;
+            // Bound the open so an unreachable router can't stall the state change.
+            let session = crate::utils::call_with_timeout(SESSION_OPEN_TIMEOUT, move || {
+                zenoh::open(config).wait()
+            })
+            .map_err(|_| {
+                gst::error_msg!(
+                    gst::ResourceError::OpenRead,
+                    [
+                        "Timed out opening Zenoh session after {:?}",
+                        SESSION_OPEN_TIMEOUT
+                    ]
+                )
+            })?
+            .map_err(|e| ZenohError::Init(e).to_error_message())?;
             SessionWrapper::Owned(session)
         };
 
@@ -552,6 +572,10 @@ impl BaseSrcImpl for ZenohSrc {
             .declare_subscriber(key_expr)
             .wait()
             .map_err(|e| ZenohError::Init(e).to_error_message())?;
+        let subscriber = Arc::new(subscriber);
+
+        // Clear any leftover flush signal from a previous run.
+        self.flushing.store(false, Ordering::SeqCst);
 
         // Reacquire state lock to complete transition
         let mut state = self.state.lock().unwrap();
@@ -571,7 +595,6 @@ impl BaseSrcImpl for ZenohSrc {
         *state = State::Started(Started {
             _session: session_wrapper,
             subscriber,
-            flushing: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(Mutex::new(Statistics::default())),
         });
 
@@ -627,10 +650,8 @@ impl BaseSrcImpl for ZenohSrc {
             imp = self,
             "Unlock called - cancelling blocking operations"
         );
-        let state = self.state.lock().unwrap();
-        if let State::Started(ref started) = *state {
-            started.flushing.store(true, Ordering::SeqCst);
-        }
+        // Lock-free: never touch the `state` lock that create() holds across its poll loop.
+        self.flushing.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -640,10 +661,7 @@ impl BaseSrcImpl for ZenohSrc {
             imp = self,
             "Unlock stop called - resuming normal operation"
         );
-        let state = self.state.lock().unwrap();
-        if let State::Started(ref started) = *state {
-            started.flushing.store(false, Ordering::SeqCst);
-        }
+        self.flushing.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -653,18 +671,12 @@ impl BaseSrcImpl for ZenohSrc {
         match event.view() {
             EventView::FlushStart(_) => {
                 gst::debug!(CAT, imp = self, "Flush start - cancelling operations");
-                let state = self.state.lock().unwrap();
-                if let State::Started(ref started) = *state {
-                    started.flushing.store(true, Ordering::SeqCst);
-                }
+                self.flushing.store(true, Ordering::SeqCst);
                 self.parent_event(event)
             }
             EventView::FlushStop(_) => {
                 gst::debug!(CAT, imp = self, "Flush stop - resuming operations");
-                let state = self.state.lock().unwrap();
-                if let State::Started(ref started) = *state {
-                    started.flushing.store(false, Ordering::SeqCst);
-                }
+                self.flushing.store(false, Ordering::SeqCst);
                 self.parent_event(event)
             }
             _ => self.parent_event(event),
@@ -705,38 +717,41 @@ impl PushSrcImpl for ZenohSrc {
         &self,
         _buffer: Option<&mut gst::BufferRef>,
     ) -> Result<CreateSuccess, gst::FlowError> {
-        let state_locked = self.state.lock().unwrap();
-        let State::Started(ref started) = *state_locked else {
-            gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
-            return Err(gst::FlowError::Error);
+        // Clone out the subscriber + stats under a short-lived lock, then release the
+        // `state` lock before the blocking recv loop so flush/unlock (which set
+        // `self.flushing`) and state changes are never queued behind create().
+        let (subscriber, stats) = {
+            let state_locked = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let State::Started(ref started) = *state_locked else {
+                gst::element_imp_error!(self, gst::CoreError::Failed, ["Not started yet"]);
+                return Err(gst::FlowError::Error);
+            };
+            (started.subscriber.clone(), started.stats.clone())
         };
 
         // Check if we're flushing before attempting to receive
-        if started.flushing.load(Ordering::SeqCst) {
+        if self.flushing.load(Ordering::SeqCst) {
             gst::debug!(CAT, imp = self, "Flushing - returning Flushing flow");
             return Err(gst::FlowError::Flushing);
         }
 
         // Get the configured settings
         let (receive_timeout_ms, apply_buffer_meta) = {
-            let settings = self.settings.lock().unwrap();
+            let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
             (settings.receive_timeout_ms, settings.apply_buffer_meta)
         };
 
         // CRITICAL: Use recv_timeout() instead of blocking recv()
         // This allows us to check the flushing flag periodically without sleeping
         let sample: zenoh::sample::Sample = loop {
-            if started.flushing.load(Ordering::SeqCst) {
+            if self.flushing.load(Ordering::SeqCst) {
                 gst::debug!(CAT, imp = self, "Flushing detected during receive");
                 return Err(gst::FlowError::Flushing);
             }
 
             // Use recv_timeout with configurable timeout to remain responsive to flushing
             // recv_timeout returns Result<Option<Sample>, RecvTimeoutError>
-            match started
-                .subscriber
-                .recv_timeout(Duration::from_millis(receive_timeout_ms))
-            {
+            match subscriber.recv_timeout(Duration::from_millis(receive_timeout_ms)) {
                 Ok(Some(sample)) => break sample,
                 Ok(None) => {
                     // No sample available, continue loop
@@ -750,7 +765,7 @@ impl PushSrcImpl for ZenohSrc {
                         continue;
                     } else {
                         // Disconnected or other error
-                        started.stats.lock().unwrap().errors += 1;
+                        stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
                         gst::element_imp_error!(
                             self,
                             gst::ResourceError::Read,
@@ -871,7 +886,7 @@ impl PushSrcImpl for ZenohSrc {
                     decompressed
                 }
                 Err(e) => {
-                    started.stats.lock().unwrap().errors += 1;
+                    stats.lock().unwrap_or_else(|e| e.into_inner()).errors += 1;
                     gst::element_imp_error!(
                         self,
                         gst::StreamError::Decode,
@@ -983,10 +998,11 @@ impl PushSrcImpl for ZenohSrc {
         }
 
         // Update statistics on success
-        let mut stats = started.stats.lock().unwrap();
-        stats.bytes_received += slice.len() as u64;
-        stats.messages_received += 1;
-        drop(stats);
+        {
+            let mut stats = stats.lock().unwrap_or_else(|e| e.into_inner());
+            stats.bytes_received += slice.len() as u64;
+            stats.messages_received += 1;
+        }
 
         Ok(CreateSuccess::NewBuffer(buffer))
     }
