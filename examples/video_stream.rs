@@ -145,14 +145,15 @@ fn main() -> Result<(), Error> {
             handle_message(&main_loop, "VIDEO SENDER", msg);
 
             // Periodically print statistics
-            if matches!(msg.view(), gst::MessageView::StateChanged(..)) {
-                if zenohsink.messages_sent() > 0 && zenohsink.messages_sent() % 100 == 0 {
-                    println!(
-                        "Sender stats: {} messages, {} bytes",
-                        zenohsink.messages_sent(),
-                        zenohsink.bytes_sent()
-                    );
-                }
+            if matches!(msg.view(), gst::MessageView::StateChanged(..))
+                && zenohsink.messages_sent() > 0
+                && zenohsink.messages_sent() % 100 == 0
+            {
+                println!(
+                    "Sender stats: {} messages, {} bytes",
+                    zenohsink.messages_sent(),
+                    zenohsink.bytes_sent()
+                );
             }
 
             gst::glib::ControlFlow::Continue
@@ -166,14 +167,15 @@ fn main() -> Result<(), Error> {
             handle_message(&main_loop, "VIDEO RECEIVER", msg);
 
             // Periodically print statistics
-            if matches!(msg.view(), gst::MessageView::StateChanged(..)) {
-                if zenohsrc.messages_received() > 0 && zenohsrc.messages_received() % 100 == 0 {
-                    println!(
-                        "Receiver stats: {} messages, {} bytes",
-                        zenohsrc.messages_received(),
-                        zenohsrc.bytes_received()
-                    );
-                }
+            if matches!(msg.view(), gst::MessageView::StateChanged(..))
+                && zenohsrc.messages_received() > 0
+                && zenohsrc.messages_received() % 100 == 0
+            {
+                println!(
+                    "Receiver stats: {} messages, {} bytes",
+                    zenohsrc.messages_received(),
+                    zenohsrc.bytes_received()
+                );
             }
 
             gst::glib::ControlFlow::Continue

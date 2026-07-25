@@ -55,9 +55,9 @@ fn verify_test_data(data: &[u8], expected_size: usize) -> bool {
     if data.len() != expected_size {
         return false;
     }
-    for i in 0..expected_size {
+    for (i, &byte) in data.iter().enumerate() {
         let expected = ((i % 256) ^ ((i / 256) % 256)) as u8;
-        if data[i] != expected {
+        if byte != expected {
             return false;
         }
     }
