@@ -1,0 +1,16 @@
+name: Publish crates
+# Publishing is a decision, not a side effect: manual dispatch only.
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Install GStreamer dev packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/Swatinem/rust-cache@v2
+      - run: cargo test --features compression --locked
+      - run: cargo publish --locked --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
