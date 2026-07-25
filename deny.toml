@@ -9,7 +9,15 @@ all-features = true
 # vulnerable dependency. `ignore` can hold specific RUSTSEC ids when a fix is
 # pending and the risk has been reviewed.
 yanked = "deny"
-ignore = []
+# TODO(2026-07-25): all five ride the zenoh 1.7 dependency stack and cannot
+# be updated independently (semver-locked). Revisit on the next zenoh bump.
+ignore = [
+    "RUSTSEC-2026-0041", # lz4-sys decompress leak (via zenoh compression)
+    "RUSTSEC-2024-0436", # paste unmaintained (proc-macro, build-time only)
+    "RUSTSEC-2023-0071", # rsa Marvin timing sidechannel (via zenoh auth)
+    "RUSTSEC-2025-0134", # rustls-pemfile unmaintained (via zenoh tls)
+    "RUSTSEC-2026-0009", # stack exhaustion DoS (transitive)
+]
 
 [licenses]
 # This crate is MPL-2.0; accept dependencies under well-known permissive or
