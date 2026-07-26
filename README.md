@@ -144,7 +144,7 @@ gst-launch-1.0 zenohsrc key-expr=demo/video ! videoconvert ! autovideosink
 
 ## Requirements
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.97+ (edition 2024)
 - GStreamer 1.20+
 
 ## License
