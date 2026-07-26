@@ -10,6 +10,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # shared compiler cache: sccache (mounted from the runner VM) -> garage S3
+  # on vm-runner-01; S3 endpoint+credentials come from the runner's env_file
+  RUSTC_WRAPPER: /srv/cache/bin/sccache
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   fmt:
@@ -31,6 +35,8 @@ jobs:
         with:
           components: clippy
       - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   test:
@@ -60,6 +66,7 @@ jobs:
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: msrv
+          cache-targets: false
       - run: cargo check --all-features --all-targets --locked
 
   deny:
@@ -82,4 +89,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - run: cargo doc --all-features --no-deps --locked
