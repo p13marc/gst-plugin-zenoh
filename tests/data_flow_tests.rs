@@ -78,10 +78,10 @@ fn test_basic_data_roundtrip() {
     // Add probe to capture data
     let srcpad = zenohsrc.static_pad("src").unwrap();
     srcpad.add_probe(gst::PadProbeType::BUFFER, move |_, probe_info| {
-        if let Some(gst::PadProbeData::Buffer(ref buffer)) = probe_info.data {
-            if let Ok(map) = buffer.map_readable() {
-                *received_clone.lock().unwrap() = Some(map.as_slice().to_vec());
-            }
+        if let Some(gst::PadProbeData::Buffer(ref buffer)) = probe_info.data
+            && let Ok(map) = buffer.map_readable()
+        {
+            *received_clone.lock().unwrap() = Some(map.as_slice().to_vec());
         }
         gst::PadProbeReturn::Remove
     });
@@ -196,11 +196,11 @@ fn test_multiple_buffers_sequence() {
 
     let srcpad = zenohsrc.static_pad("src").unwrap();
     srcpad.add_probe(gst::PadProbeType::BUFFER, move |_, probe_info| {
-        if let Some(gst::PadProbeData::Buffer(ref buffer)) = probe_info.data {
-            if let Ok(map) = buffer.map_readable() {
-                received_clone.lock().unwrap().push(map.as_slice().to_vec());
-                received_count_probe.fetch_add(1, Ordering::SeqCst);
-            }
+        if let Some(gst::PadProbeData::Buffer(ref buffer)) = probe_info.data
+            && let Ok(map) = buffer.map_readable()
+        {
+            received_clone.lock().unwrap().push(map.as_slice().to_vec());
+            received_count_probe.fetch_add(1, Ordering::SeqCst);
         }
         gst::PadProbeReturn::Ok
     });
@@ -313,11 +313,11 @@ fn test_various_buffer_sizes() {
 
     let srcpad = zenohsrc.static_pad("src").unwrap();
     srcpad.add_probe(gst::PadProbeType::BUFFER, move |_, probe_info| {
-        if let Some(gst::PadProbeData::Buffer(ref buffer)) = probe_info.data {
-            if let Ok(map) = buffer.map_readable() {
-                received_clone.lock().unwrap().push(map.as_slice().to_vec());
-                received_count_probe.fetch_add(1, Ordering::SeqCst);
-            }
+        if let Some(gst::PadProbeData::Buffer(ref buffer)) = probe_info.data
+            && let Ok(map) = buffer.map_readable()
+        {
+            received_clone.lock().unwrap().push(map.as_slice().to_vec());
+            received_count_probe.fetch_add(1, Ordering::SeqCst);
         }
         gst::PadProbeReturn::Ok
     });

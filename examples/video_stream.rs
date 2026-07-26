@@ -237,15 +237,15 @@ fn handle_message(main_loop: &gst::glib::MainLoop, pipeline: &str, msg: &gst::Me
         }
         MessageView::StateChanged(state_changed) => {
             // Only log pipeline-level state changes
-            if let Some(src) = msg.src() {
-                if src.type_().name() == "GstPipeline" {
-                    println!(
-                        "{}: Pipeline state changed from {:?} to {:?}",
-                        pipeline,
-                        state_changed.old(),
-                        state_changed.current()
-                    );
-                }
+            if let Some(src) = msg.src()
+                && src.type_().name() == "GstPipeline"
+            {
+                println!(
+                    "{}: Pipeline state changed from {:?} to {:?}",
+                    pipeline,
+                    state_changed.old(),
+                    state_changed.current()
+                );
             }
         }
         _ => (),

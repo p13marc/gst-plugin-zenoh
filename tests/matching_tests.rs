@@ -315,16 +315,14 @@ fn test_matching_bus_message() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !found_message && std::time::Instant::now() < deadline {
-        if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
-            if let gst::MessageView::Element(element_msg) = msg.view() {
-                if let Some(structure) = element_msg.structure() {
-                    if structure.name() == "zenoh-matching-changed" {
-                        let has_subs = structure.get::<bool>("has-subscribers").unwrap();
-                        if has_subs {
-                            found_message = true;
-                        }
-                    }
-                }
+        if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100))
+            && let gst::MessageView::Element(element_msg) = msg.view()
+            && let Some(structure) = element_msg.structure()
+            && structure.name() == "zenoh-matching-changed"
+        {
+            let has_subs = structure.get::<bool>("has-subscribers").unwrap();
+            if has_subs {
+                found_message = true;
             }
         }
     }
