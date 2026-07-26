@@ -147,7 +147,7 @@ fn main() -> Result<(), Error> {
             // Periodically print statistics
             if matches!(msg.view(), gst::MessageView::StateChanged(..))
                 && zenohsink.messages_sent() > 0
-                && zenohsink.messages_sent() % 100 == 0
+                && zenohsink.messages_sent().is_multiple_of(100)
             {
                 println!(
                     "Sender stats: {} messages, {} bytes",
@@ -169,7 +169,7 @@ fn main() -> Result<(), Error> {
             // Periodically print statistics
             if matches!(msg.view(), gst::MessageView::StateChanged(..))
                 && zenohsrc.messages_received() > 0
-                && zenohsrc.messages_received() % 100 == 0
+                && zenohsrc.messages_received().is_multiple_of(100)
             {
                 println!(
                     "Receiver stats: {} messages, {} bytes",
