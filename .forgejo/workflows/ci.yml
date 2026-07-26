@@ -62,7 +62,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - uses: https://github.com/dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.96"
+          toolchain: "1.97"
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
           key: msrv
