@@ -1,5 +1,5 @@
 # Dockerfile for building gst-plugin-zenoh on Debian 12 (Bookworm)
-FROM debian:bookworm
+FROM debian:trixie
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
