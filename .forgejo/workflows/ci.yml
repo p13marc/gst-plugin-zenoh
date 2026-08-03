@@ -19,7 +19,7 @@ jobs:
   fmt:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -28,7 +28,7 @@ jobs:
   clippy:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Install GStreamer dev packages
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - uses: https://github.com/dtolnay/rust-toolchain@stable
@@ -45,7 +45,7 @@ jobs:
       matrix:
         features: ["", "--features compression", "--all-features"]
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Install GStreamer dev packages
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-tools
       - uses: https://github.com/dtolnay/rust-toolchain@stable
@@ -57,7 +57,7 @@ jobs:
   msrv:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Install GStreamer dev packages
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - uses: https://github.com/dtolnay/rust-toolchain@master
@@ -72,7 +72,7 @@ jobs:
   deny:
     runs-on: ubuntu-24.04
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/taiki-e/install-action@v2
         with:
@@ -84,7 +84,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7.0.1
       - name: Install GStreamer dev packages
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - uses: https://github.com/dtolnay/rust-toolchain@stable
