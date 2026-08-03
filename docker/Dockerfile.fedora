@@ -1,5 +1,5 @@
 # Dockerfile for building gst-plugin-zenoh on Fedora 41
-FROM fedora:41
+FROM fedora:45
 
 # Install system dependencies
 RUN dnf install -y \
