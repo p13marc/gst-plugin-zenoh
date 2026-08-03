@@ -1,5 +1,5 @@
 # Dockerfile for building gst-plugin-zenoh on Oracle Linux 9
-FROM oraclelinux:9
+FROM oraclelinux:10
 
 # Enable EPEL and CodeReady Builder for additional packages
 RUN dnf install -y oracle-epel-release-el9 && \
