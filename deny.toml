@@ -9,14 +9,14 @@ all-features = true
 # vulnerable dependency. `ignore` can hold specific RUSTSEC ids when a fix is
 # pending and the risk has been reviewed.
 yanked = "deny"
-# TODO(2026-07-25): all five ride the zenoh 1.7 dependency stack and cannot
-# be updated independently (semver-locked). Revisit on the next zenoh bump.
+# TODO(2026-08-29): re-reviewed on the zenoh 1.10 bump. RUSTSEC-2026-0009
+# (time stack exhaustion) was dropped — fixed by cargo update -p time. The
+# four below still have no upstream fix reachable from the zenoh 1.10 tree.
 ignore = [
-    "RUSTSEC-2026-0041", # lz4-sys decompress leak (via zenoh compression)
+    "RUSTSEC-2026-0041", # lz4_flex decompress leak; zenoh pins ^0.10, fix is 0.11.6+
     "RUSTSEC-2024-0436", # paste unmaintained (proc-macro, build-time only)
-    "RUSTSEC-2023-0071", # rsa Marvin timing sidechannel (via zenoh auth)
+    "RUSTSEC-2023-0071", # rsa Marvin timing sidechannel (via zenoh auth); no fix upstream
     "RUSTSEC-2025-0134", # rustls-pemfile unmaintained (via zenoh tls)
-    "RUSTSEC-2026-0009", # stack exhaustion DoS (transitive)
 ]
 
 [licenses]

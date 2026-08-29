@@ -5,6 +5,7 @@ on:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
   pull_request:
     paths-ignore: ['**.md', 'docs/**', 'LICENSE*']
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -82,7 +83,7 @@ jobs:
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - run: cargo deny check licenses advisories sources
+      - run: cargo deny check
 
   docs:
     runs-on: ubuntu-24.04
